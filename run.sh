@@ -12,8 +12,10 @@
 #   PORT           host port               (default: 8080)
 #   GPU_LAYERS     -ngl / layers on GPU    (default: 999 = all)
 #   HF_TOKEN       Hugging Face token for gated/private repos
-#   LLAMA_CACHE    host cache for -hf downloads (default: ~/.cache/llama.cpp)
-#   MODELS_DIR     host dir for local -m models (default: dirname of the path arg)
+#   HF_HOME        shared host model cache (default: ~/.cache/huggingface,
+#                  same dir/default as the sibling vLLM setup -> one common
+#                  model store). llama.cpp's -hf cache lands in a llama.cpp/
+#                  subdir of it (its flat layout differs from the HF hub layout).
 #   DETACH=1       run detached + restart (server mode) instead of interactive
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -21,7 +23,35 @@ cd "$(dirname "$0")"
 IMAGE="${IMAGE:-llama-spark:latest}"
 PORT="${PORT:-8080}"
 GPU_LAYERS="${GPU_LAYERS:-999}"
-LLAMA_CACHE="${LLAMA_CACHE:-$HOME/.cache/llama.cpp}"
+HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
+
+# Look for an already-downloaded GGUF for an HF repo[:quant] in the shared HF
+# hub cache, so we can serve it in place (-m) instead of re-downloading via -hf
+# into llama.cpp's separate flat cache. Echoes the host path of the GGUF (the
+# first shard, for sharded models) on success; prints nothing if none is found.
+resolve_cached_gguf() {
+  local spec="$1" repo quant cache_repo snap f first
+  repo="${spec%%:*}"
+  quant=""
+  [[ "$spec" == *:* ]] && quant="${spec#*:}"
+  cache_repo="$HF_HOME/hub/models--${repo//\//--}"
+  [[ -d "$cache_repo/snapshots" ]] || return 0
+  # Prefer the commit refs/main points at; else the newest snapshot dir.
+  snap=""
+  [[ -f "$cache_repo/refs/main" ]] && snap="$cache_repo/snapshots/$(<"$cache_repo/refs/main")"
+  [[ -d "$snap" ]] || snap="$(find "$cache_repo/snapshots" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1)"
+  [[ -d "$snap" ]] || return 0
+  # Candidate GGUFs (follow symlinks into blobs/), optionally filtered by quant.
+  local -a ggufs
+  mapfile -t ggufs < <(find -L "$snap" -type f -iname "*${quant}*.gguf" 2>/dev/null | sort)
+  [[ ${#ggufs[@]} -eq 0 ]] && return 0
+  # For sharded models serve the first shard; llama-server loads the rest.
+  first=""
+  for f in "${ggufs[@]}"; do
+    [[ "$f" == *-00001-of-* ]] && { first="$f"; break; }
+  done
+  printf '%s\n' "${first:-${ggufs[0]}}"
+}
 
 MODEL="${1:-}"; shift || true
 if [[ -z "$MODEL" ]]; then
@@ -44,11 +74,26 @@ if [[ -e "$MODEL" ]]; then
   server_args+=(-m "/models/${base}")
   echo ">> serving local model /models/${base}"
 else
-  # Treat as a Hugging Face repo (optionally repo:quant); cache downloads on host.
-  mkdir -p "$LLAMA_CACHE"
-  run_flags+=(-v "${LLAMA_CACHE}:/root/.cache/llama.cpp")
-  server_args+=(-hf "$MODEL")
-  echo ">> serving HF model $MODEL (cache: $LLAMA_CACHE)"
+  # Treat as a Hugging Face repo (optionally repo:quant). Share one host model
+  # store with vLLM (HF_HOME, default ~/.cache/huggingface).
+  mkdir -p "$HF_HOME"
+  cached_gguf="$(resolve_cached_gguf "$MODEL")"
+  if [[ -n "$cached_gguf" ]]; then
+    # A GGUF for this repo is already in the shared HF hub cache (e.g. pulled by
+    # `hf download`): serve it in place by path, no second download/copy.
+    run_flags+=(-v "${HF_HOME}:/root/.cache/huggingface:ro")
+    server_args+=(-m "/root/.cache/huggingface/${cached_gguf#"$HF_HOME"/}")
+    echo ">> serving cached GGUF $MODEL"
+    echo "   reused in place: $cached_gguf"
+  else
+    # Not cached as GGUF: download via -hf into the shared store; llama.cpp's
+    # own flat cache lands in a llama.cpp/ subdir of it.
+    run_flags+=(-v "${HF_HOME}:/root/.cache/huggingface"
+                -e "HF_HOME=/root/.cache/huggingface"
+                -e "LLAMA_CACHE=/root/.cache/huggingface/llama.cpp")
+    server_args+=(-hf "$MODEL")
+    echo ">> serving HF model $MODEL (shared cache: $HF_HOME)"
+  fi
 fi
 
 if [[ "${DETACH:-0}" == 1 ]]; then

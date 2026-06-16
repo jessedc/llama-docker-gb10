@@ -7,6 +7,14 @@ Same shape as the sibling `~/vllm/` setup: pin a known-good CUDA base image,
 recompile the GPU kernels for this exact chip, and record the pins in
 `build.lock` for reproducible rebuilds.
 
+## Prerequisites
+
+- An NVIDIA DGX Spark (GB10) with the GPU driver installed (`nvidia-smi` works).
+- Docker, plus the **NVIDIA Container Toolkit** — `--gpus all` won't work without
+  it. Quick check: `docker run --rm --gpus all nvidia/cuda:13.0.3-runtime-ubuntu24.04 nvidia-smi`
+  should print the GPU. If it errors, install the toolkit and restart Docker.
+- Network access at build time (clones llama.cpp; fetches the Web UI unless `--no-ui`).
+
 ## Why build instead of pulling a prebuilt image
 
 There is no reliable prebuilt GB10 image to `docker pull`:
@@ -44,7 +52,7 @@ is mounted as a BuildKit cache so rebuilds are fast.
 ## Serve
 
 ```bash
-# Pull + serve a GGUF straight from Hugging Face (cached under ~/.cache/llama.cpp)
+# Pull + serve a GGUF straight from Hugging Face (cached under ~/.cache/huggingface)
 ./run.sh ggml-org/gemma-3-4b-it-GGUF
 
 # Serve a local GGUF (its directory is mounted read-only)
@@ -58,11 +66,32 @@ DETACH=1 ./run.sh ggml-org/gemma-3-4b-it-GGUF
 ```
 
 Then: OpenAI-compatible API at `http://localhost:8080/v1/chat/completions`, and
-the Web UI at `http://localhost:8080/`.
+the Web UI at `http://localhost:8080/`. Quick check it's up:
+
+```bash
+curl localhost:8080/health                       # -> {"status":"ok"}
+curl localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"hi"}]}'
+```
+
+### Reusing GGUFs already in the shared cache
+
+If a GGUF for a repo is already in the shared HF cache (e.g. you ran
+`hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q8_0.gguf`), `run.sh`
+detects it and serves it **in place** (`-m`) instead of re-downloading — so the
+same file can also be used by vLLM's GGUF loader. Pin a quant with `repo:QUANT`
+(e.g. `./run.sh ggml-org/gemma-3-4b-it-GGUF:Q8_0`); sharded models resolve to
+the first shard automatically.
 
 ### Useful env vars (see `run.sh` header)
 
-`IMAGE`, `PORT` (8080), `GPU_LAYERS` (999=all), `HF_TOKEN`, `LLAMA_CACHE`, `DETACH`.
+`IMAGE`, `PORT` (8080), `GPU_LAYERS` (999=all), `HF_TOKEN`, `HF_HOME`, `DETACH`.
+
+`-hf` downloads share one host model store with the sibling vLLM setup:
+`HF_HOME` defaults to `~/.cache/huggingface` (same as vLLM). llama.cpp's flat
+`-hf` cache lands in a `llama.cpp/` subdir of it — its layout differs from the
+HF hub `models--org--repo` layout, so files aren't deduped across the two, but
+both tools keep their models under one directory.
 
 ## Notes
 
