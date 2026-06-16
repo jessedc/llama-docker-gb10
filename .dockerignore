@@ -1,0 +1,4 @@
+# Nothing from this dir is needed in the build context: the Dockerfile clones
+# llama.cpp itself. Keep the context tiny.
+*
+!Dockerfile

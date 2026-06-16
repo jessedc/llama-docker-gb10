@@ -1,0 +1,5 @@
+# Local agent/editor state
+.claude/
+
+# build.lock IS committed -- it pins the base digest + llama.cpp commit for
+# `./build.sh --reproduce`.
