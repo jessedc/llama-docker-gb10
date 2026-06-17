@@ -51,7 +51,7 @@ ENV LIBRARY_PATH=/usr/local/cuda/lib64/stubs:${LIBRARY_PATH}
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       git cmake ccache build-essential curl ca-certificates \
-      libcurl4-openssl-dev libgomp1 \
+      libcurl4-openssl-dev libssl-dev libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
 # Fetch the requested llama.cpp revision (branch, tag, or commit SHA). An
@@ -76,6 +76,11 @@ RUN git fetch --depth 1 origin ${LLAMA_REF} \
 #      NVIDIA container runtime injects via `--gpus all`. (Same flag the official
 #      llama.cpp .devops/cuda.Dockerfile uses.)
 #  -DLLAMA_CURL=ON        : let llama-server pull GGUFs via -hf at runtime.
+#  -DLLAMA_OPENSSL=ON     : compile in HTTPS support for -hf downloads. Newer
+#                           llama.cpp gates its HTTP client's TLS behind an SSL
+#                           backend; without OpenSSL dev files at configure time
+#                           HTTPS is silently disabled and every -hf pull dies
+#                           with "HTTPS is not supported. Please rebuild ...".
 RUN --mount=type=cache,target=/ccache \
     cmake -B build \
       -DGGML_CUDA=ON \
@@ -84,6 +89,7 @@ RUN --mount=type=cache,target=/ccache \
       -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined \
       -DLLAMA_CURL=ON \
+      -DLLAMA_OPENSSL=ON \
       -DLLAMA_BUILD_TESTS=OFF \
       -DLLAMA_BUILD_TOOLS=ON \
       -DLLAMA_BUILD_EXAMPLES=OFF \
@@ -101,7 +107,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-runtime-${UBUNTU_VERSION} AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      libcurl4 libgomp1 ca-certificates \
+      libcurl4 libssl3 libgomp1 ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 # Copy the server binary plus every ggml/llama shared lib it links. They all
