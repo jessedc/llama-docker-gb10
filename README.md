@@ -34,7 +34,9 @@ with `-DCMAKE_CUDA_ARCHITECTURES=121a`, then ship the binary on a slim
 |---------------|---------|
 | `Dockerfile`  | Two-stage build (devel → runtime), server target only. |
 | `build.sh`    | Resolve + pin base digest & llama.cpp commit, build, write `build.lock`. |
-| `run.sh`      | Serve a HF repo or a local GGUF with `--gpus all`. |
+| `run.sh`      | Serve any HF repo or a local GGUF with `--gpus all` (the generic runner). |
+| `run-gemma4-12b.sh` | Pinned runner for `unsloth/gemma-4-12b-it-GGUF` (default `UD-Q4_K_XL`). |
+| `run-zeta-2.sh` | Pinned runner for `bartowski/zed-industries_zeta-2-GGUF` (default `Q8_0`). |
 | `build.lock`  | Generated pins for `./build.sh --reproduce`. |
 
 ## Build
@@ -82,6 +84,20 @@ detects it and serves it **in place** (`-m`) instead of re-downloading — so th
 same file can also be used by vLLM's GGUF loader. Pin a quant with `repo:QUANT`
 (e.g. `./run.sh ggml-org/gemma-3-4b-it-GGUF:Q8_0`); sharded models resolve to
 the first shard automatically.
+
+### Pinned per-model runners
+
+For models we serve regularly there are dedicated scripts that pin the repo,
+quant, and known-good llama-server flags so you don't have to remember them.
+They share the same env vars (`PORT`, `QUANT`, `GPU_LAYERS`, `DETACH`, …) and
+pass any extra flags straight through to `llama-server`:
+
+```bash
+./run-gemma4-12b.sh                    # unsloth/gemma-4-12b-it-GGUF  (UD-Q4_K_XL)
+QUANT=UD-Q5_K_XL ./run-gemma4-12b.sh   # override the quant
+./run-zeta-2.sh                        # bartowski/zed-industries_zeta-2-GGUF (Q8_0)
+DETACH=1 ./run-zeta-2.sh               # background server, restarts on boot
+```
 
 ### Useful env vars (see `run.sh` header)
 
