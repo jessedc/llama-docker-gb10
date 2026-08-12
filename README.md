@@ -142,12 +142,31 @@ Reasoning text comes back in a separate `reasoning_content` field, not in
 consumed by reasoning and leave `content` empty.
 
 ```bash
-./run-muse-glimmer.sh                    # Q6 + vision + speculative decoding
-QUANT=UD-Q4_K_XL ./run-muse-glimmer.sh   # 16 GB instead of 26 GB
+./run-muse-glimmer.sh                    # Q6 + vision + speculative decoding, 4 slots
+QUANT=UD-Q4_K_XL ./run-muse-glimmer.sh   # 16 GB instead of 25 GB
 SPEC=0 ./run-muse-glimmer.sh             # disable speculative decoding
-MMPROJ=0 ./run-muse-glimmer.sh           # text-only (skips the 3.8 GB encoder)
+MMPROJ=0 ./run-muse-glimmer.sh           # text-only (skips the 2.0 GB encoder)
 REASONING=high ./run-muse-glimmer.sh     # low | medium | high | xhigh
+PARALLEL=1 ./run-muse-glimmer.sh         # single slot
 ```
+
+**Concurrency.** `--ctx-size` in llama.cpp is the *total* budget split across
+slots, so raising `--parallel` against a fixed total silently shrinks every
+slot — 4 slots against `-c 131072` leaves each request only 32768. `CTX` in
+this script is therefore **per slot** and the total is multiplied out, so
+`PARALLEL=4` really does mean 4 × 131072.
+
+Four slots is the default because the extra ones are free until used:
+
+| Load | Per request | Aggregate |
+|------|-------------|-----------|
+| 1 request | 15.7 t/s | 15.7 t/s |
+| 4 concurrent | 11.7–13.1 t/s | **~49 t/s (3.1×)** |
+
+A lone request measured the same at `PARALLEL=1`, `2`, and `4`, and the extra
+slots added no measurable memory — the model's alternating sliding-window
+layers (window 2048) keep the KV cache small, so only about half the layers
+hold the full context.
 
 Reasoning strength is set via `--chat-template-kwargs '{"reasoning_strength":...}'`
 and defaults to `low`. Requires a llama.cpp build **≥ b10353** (upstream #26841);

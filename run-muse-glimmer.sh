@@ -26,6 +26,7 @@
 # Usage:
 #   ./run-muse-glimmer.sh                    # foreground (Ctrl-C to stop)
 #   QUANT=UD-Q4_K_XL ./run-muse-glimmer.sh   # pick a different quant
+#   PARALLEL=1 ./run-muse-glimmer.sh         # single slot (default is 4)
 #   SPEC=0 ./run-muse-glimmer.sh             # disable speculative decoding
 #   MMPROJ=0 ./run-muse-glimmer.sh           # text-only (skips the 3.8 GB encoder)
 #   REASONING=high ./run-muse-glimmer.sh     # low | medium | high | xhigh
@@ -35,8 +36,8 @@
 # NOTE: the sibling vLLM container (qwen36-27b) holds ~85 GB of the Spark's
 # shared 121 GB. Stop it first -- `docker stop qwen36-27b` -- or this won't fit.
 #
-# Env: IMAGE, PORT (host), QUANT, CTX, GPU_LAYERS, SPEC, DRAFT_MAX, MMPROJ,
-#      REASONING, HF_TOKEN, HF_HOME, DETACH.
+# Env: IMAGE, PORT (host), QUANT, CTX (per slot), PARALLEL, GPU_LAYERS, SPEC,
+#      DRAFT_MAX, MMPROJ, REASONING, HF_TOKEN, HF_HOME, DETACH.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -44,7 +45,8 @@ IMAGE="${IMAGE:-llama-spark:latest}"
 REPO="unsloth/Muse-Glimmer-30B-GGUF"
 QUANT="${QUANT:-UD-Q6_K_XL}"           # ~26 GB; near-lossless Dynamic 2.0 6-bit
 PORT="${PORT:-8080}"
-CTX="${CTX:-131072}"                   # native context; the model tops out at 262144
+CTX="${CTX:-131072}"                   # PER SLOT; native is 131072, model tops out at 262144
+PARALLEL="${PARALLEL:-4}"              # concurrent request slots; idle slots cost nothing
 GPU_LAYERS="${GPU_LAYERS:-999}"        # 999 = offload every layer (whole model on GPU)
 REASONING="${REASONING:-low}"          # reasoning_strength: low|medium|high|xhigh
 DRAFT_MAX="${DRAFT_MAX:-4}"            # draft tokens per verify step (upstream default 3)
@@ -88,14 +90,18 @@ fi
 # still override per request. -fa on + q8_0 KV cache keeps the 131k context
 # affordable on the Spark's unified memory. --jinja applies the model's own
 # control-token chat template, which tool calling depends on.
+# --ctx-size is the TOTAL budget llama-server splits across slots, so raising
+# --parallel against a fixed total silently shrinks every slot (4 slots against
+# 131072 leaves each request 32768). CTX here is therefore PER SLOT and the
+# total is multiplied out, which keeps `PARALLEL=4` honest: 4 x 131072.
 server_args=(
   -hf "${REPO}:${QUANT}"
   -ngl "${GPU_LAYERS}"
-  --ctx-size "${CTX}"
+  --ctx-size "$(( CTX * PARALLEL ))"
   --flash-attn on
   --cache-type-k q8_0
   --cache-type-v q8_0
-  --parallel 1
+  --parallel "${PARALLEL}"
   --jinja
   --chat-template-kwargs "{\"reasoning_strength\":\"${REASONING}\"}"
   --temp 1.0
@@ -130,6 +136,7 @@ else
 fi
 
 echo ">> serving ${REPO}:${QUANT}  (vision=${MMPROJ:-1} spec=${SPEC:-1} reasoning=${REASONING})"
+echo ">> ${PARALLEL} slot(s) x ${CTX} ctx = $(( CTX * PARALLEL )) total"
 echo ">> http://localhost:${PORT}  (OpenAI-compatible: /v1/chat/completions , Web UI at /)"
 set -x
 exec docker run "${run_flags[@]}" "$IMAGE" "${server_args[@]}" "$@"
