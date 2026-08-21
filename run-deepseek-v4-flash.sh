@@ -57,7 +57,18 @@ IMAGE="${IMAGE:-llama-spark:latest}"
 REPO="unsloth/DeepSeek-V4-Flash-0731-GGUF"
 QUANT="${QUANT:-UD-IQ2_M}"             # 84.68 GiB; + 10.15 GiB drafter = 94.8 GiB resident
 PORT="${PORT:-8080}"
-CTX="${CTX:-32768}"                    # TOTAL across slots -- see the --ctx-size note below
+CTX="${CTX:-262144}"                   # TOTAL across slots -- see the --ctx-size note below
+                                       # Measured on the Spark (q8_0 KV + DSpark drafter resident):
+                                       #   32768 ctx -> 97918 MiB     262144 ctx -> 98895 MiB
+                                       # 8x the context costs only +977 MiB, because most of the
+                                       # 43 blocks are sliding-window (attention.sliding_window=128,
+                                       # see also attention.compress_ratios) and so cost a CONSTANT
+                                       # amount regardless of ctx; only the full-attention minority
+                                       # scales. Fits ~672 MiB constant + ~4.4 KiB/token, leaving
+                                       # ~25 GiB free of the GB10's 124610 MiB.
+                                       # Native max is 1048576 (yarn x16 over a 65536 base) and by
+                                       # the same fit would land ~102 GiB -- also fits; prefill
+                                       # time, not memory, is what makes big ctx expensive here.
 PARALLEL="${PARALLEL:-1}"              # 284B at ~95 GiB leaves little room for concurrency
 GPU_LAYERS="${GPU_LAYERS:-999}"        # 999 = offload every layer (whole model on GPU)
 REASONING="${REASONING:-none}"         # reasoning_effort: none | high | max
