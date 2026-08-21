@@ -39,7 +39,8 @@
 #   QUANT=UD-IQ1_M ./run-deepseek-v4-flash.sh     # smaller quant, more headroom
 #   SPEC=0 ./run-deepseek-v4-flash.sh             # disable DSpark (frees ~10 GiB)
 #   REASONING=high ./run-deepseek-v4-flash.sh     # none | high | max
-#   CACHE_TYPE=q8_0 ./run-deepseek-v4-flash.sh    # halve KV bytes (forces -fa on)
+#   CACHE_TYPE=f16 FLASH_ATTN=auto ./run-deepseek-v4-flash.sh   # fall back if a
+#                                                 # future build rejects q8_0 KV
 #   DETACH=1 ./run-deepseek-v4-flash.sh           # background server, restarts on boot
 #   ./run-deepseek-v4-flash.sh --ctx-size 65536   # append/override any llama-server flag
 #
@@ -61,8 +62,8 @@ PARALLEL="${PARALLEL:-1}"              # 284B at ~95 GiB leaves little room for 
 GPU_LAYERS="${GPU_LAYERS:-999}"        # 999 = offload every layer (whole model on GPU)
 REASONING="${REASONING:-none}"         # reasoning_effort: none | high | max
 DRAFT_MAX="${DRAFT_MAX:-3}"            # draft tokens per verify step; unsloth's measured default
-FLASH_ATTN="${FLASH_ATTN:-auto}"       # on | off | auto -- see the caveat below
-CACHE_TYPE="${CACHE_TYPE:-f16}"        # KV cache type; q8_0 needs FLASH_ATTN=on
+FLASH_ATTN="${FLASH_ATTN:-on}"         # measured: accepted on this arch (see below)
+CACHE_TYPE="${CACHE_TYPE:-q8_0}"       # measured: half the KV bytes AND faster than f16
 HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 mkdir -p "$HF_HOME"
 
@@ -145,11 +146,25 @@ fi
 # ~2.8 GiB at 32768. q8_0 roughly halves that but llama.cpp needs flash
 # attention for a quantized V cache, hence the CACHE_TYPE/FLASH_ATTN pairing.
 #
-# FLASH_ATTN defaults to `auto`, NOT `on`: DeepSeek-V4 attention carries a
-# sparse indexer (index_topk 512 over 64 index heads) alongside the compressed
-# latent path, and letting llama.cpp choose avoids booting into a hard reject
-# on an arch this new. Set FLASH_ATTN=on together with CACHE_TYPE=q8_0 once
-# you've confirmed it takes -- that is the configuration to measure first.
+# FLASH_ATTN=on + q8_0 KV is MEASURED, not assumed. The worry was that
+# DeepSeek-V4 attention carries a sparse indexer (index_topk 512 over 64 index
+# heads) alongside the compressed latent path and might reject flash attention
+# on an arch this new. It does not: b10375 accepts -fa on with a q8_0 K/V cache
+# and it is the fastest configuration measured here, so it is the default.
+# Keep FLASH_ATTN=auto CACHE_TYPE=f16 as the fallback if a future build regresses.
+#
+# Measured on this box (image ba360efe / b10375, UD-IQ2_M, 300-token single
+# stream, temperature 0, warm, 21-token prompt):
+#
+#   | config                          | decode    | draft accepted |
+#   |---------------------------------|-----------|----------------|
+#   | SPEC=0 (no drafter)             | 20.57 t/s | --             |
+#   | SPEC=1, f16 KV, -fa auto        | 30.01 t/s | 180/354 (51%)  |
+#   | SPEC=1, q8_0 KV, -fa on (deflt) | 31.58 t/s | 184/343 (54%)  |
+#
+# DSpark is worth +54% decode over no drafter. Model load is ~80-100 s.
+# Resident is ~102 GiB of the 121 GiB either way -- weights dominate, so the
+# q8_0 KV saving buys context headroom rather than a smaller footprint.
 #
 # Sampling follows DeepSeek's own published eval settings for 0731
 # (temperature 1.0, top_p 0.95); the GGUF's baked-in metadata says top_p 1.0.

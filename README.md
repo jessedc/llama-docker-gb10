@@ -134,8 +134,28 @@ nothing cached it falls back to `-hf` and pulls it itself.
 checkpoint (25 FP8 projections, BF16 Markov/confidence heads, MXFP4 routed
 experts; `general.architecture = dflash`). It requires `--spec-type draft-dspark`
 — not the `draft-simple` path used by ordinary same-family draft models.
-Unsloth measures **up to 2× decode**; upstream quotes 120 t/s vs 60 t/s on a
-B200. `--spec-draft-n-max 3` is their measured default and this script's.
+`--spec-draft-n-max 3` is Unsloth's measured default and this script's; at load
+it reports `block_size=5, mask_token_id=128799, n_extract=3`, matching the
+`dspark_*` fields in the source `config.json`.
+
+**Measured on the Spark** (image `ba360efe` / b10375, `UD-IQ2_M`, 300-token
+single stream, `temperature 0`, warm, 21-token prompt):
+
+| Config | Decode | Draft accepted |
+|--------|--------|----------------|
+| `SPEC=0` (no drafter) | 20.57 t/s | — |
+| `SPEC=1`, f16 KV, `-fa auto` | 30.01 t/s (**1.46×**) | 180/354 (51%) |
+| `SPEC=1`, q8_0 KV, `-fa on` (default) | **31.58 t/s** (**1.54×**) | 184/343 (54%) |
+
+Model load is ~80–100 s; resident is ~102 GiB of the 121 GiB in every config —
+weights dominate, so the q8_0 KV saving buys context headroom rather than a
+smaller footprint. For reference, `tekosML`'s GB10-tuned IQ2XXS build measures
+16.9 t/s target-only, and Unsloth quotes ~2× for DSpark on a B200.
+
+Tool calling works: DeepSeek's DSML blocks parse into standard OpenAI
+`tool_calls` with `finish_reason: tool_calls`. Reasoning arrives in a separate
+`reasoning_content` field and **counts against `max_tokens`** — a 300-token cap
+on a hard prompt is consumed entirely by thinking and leaves `content` empty.
 
 ##### Why llama.cpp and not vLLM for this model
 
@@ -172,19 +192,20 @@ this model lives in llama-docker.
   ("leave absolutely nothing to chance…") that can run a trivial prompt for many
   minutes. vLLM's `deepseek_v4` path falls into exactly this trap by defaulting
   to `high`; here we simply don't.
-- **`FLASH_ATTN` defaults to `auto`, not `on`.** DeepSeek-V4 attention carries a
-  sparse indexer (`index_topk 512` over 64 index heads) alongside the MLA-style
-  compressed latent path; letting llama.cpp choose avoids booting straight into
-  a hard reject on an arch this new. A quantized V cache needs flash attention,
-  so `CACHE_TYPE=q8_0` implies `FLASH_ATTN=on` — that pairing is the first thing
-  to measure, and it roughly halves the ~86 KiB/token KV cost.
+- **`FLASH_ATTN=on` + `q8_0` KV is measured, not assumed.** The concern was that
+  DeepSeek-V4 attention carries a sparse indexer (`index_topk 512` over 64 index
+  heads) alongside the MLA-style compressed latent path, and might reject flash
+  attention on an arch this new. It doesn't — b10375 accepts `-fa on` with a
+  `q8_0` K/V cache, and that's both the fastest configuration measured and half
+  the KV bytes, so it's the default. `FLASH_ATTN=auto CACHE_TYPE=f16` is the
+  fallback if a future build regresses.
 
 ```bash
 ./run-deepseek-v4-flash.sh                  # IQ2_M + DSpark, 32k ctx
 QUANT=UD-IQ1_M ./run-deepseek-v4-flash.sh   # 80.9 GiB instead of 84.7
 SPEC=0 ./run-deepseek-v4-flash.sh           # no drafter, frees ~10 GiB
 REASONING=high ./run-deepseek-v4-flash.sh   # none | high | max
-CACHE_TYPE=q8_0 FLASH_ATTN=on ./run-deepseek-v4-flash.sh
+CACHE_TYPE=f16 FLASH_ATTN=auto ./run-deepseek-v4-flash.sh   # pre-measurement fallback
 ```
 
 Quant sizes in this repo, for fitting against the 121 GiB the Spark actually
