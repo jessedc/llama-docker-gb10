@@ -37,13 +37,14 @@ with `-DCMAKE_CUDA_ARCHITECTURES=121a`, then ship the binary on a slim
 | `run.sh`      | Serve any HF repo or a local GGUF with `--gpus all` (the generic runner). |
 | `run-gemma4-12b.sh` | Pinned runner for `unsloth/gemma-4-12b-it-GGUF` (default `UD-Q4_K_XL`). |
 | `run-zeta-2.sh` | Pinned runner for `bartowski/zed-industries_zeta-2-GGUF` (default `Q8_0`). |
+| `run-muse-glimmer.sh` | Pinned runner for `unsloth/Muse-Glimmer-30B-GGUF` (default `UD-Q6_K_XL`), with vision + DFlash speculative decoding. |
 | `build.lock`  | Generated pins for `./build.sh --reproduce`. |
 
 ## Build
 
 ```bash
 ./build.sh                 # latest llama.cpp master HEAD
-./build.sh --ref b9671     # a specific tag/branch/commit
+./build.sh --ref b10375    # a specific tag/branch/commit (current pin)
 ./build.sh --reproduce     # rebuild exactly what build.lock records
 ./build.sh --no-ui         # skip the embedded Web UI (no build-time HF fetch)
 ```
@@ -97,7 +98,83 @@ pass any extra flags straight through to `llama-server`:
 QUANT=UD-Q5_K_XL ./run-gemma4-12b.sh   # override the quant
 ./run-zeta-2.sh                        # bartowski/zed-industries_zeta-2-GGUF (Q8_0)
 DETACH=1 ./run-zeta-2.sh               # background server, restarts on boot
+./run-muse-glimmer.sh                  # unsloth/Muse-Glimmer-30B-GGUF (UD-Q6_K_XL)
 ```
+
+#### Muse Glimmer 30B — vision + speculative decoding
+
+`run-muse-glimmer.sh` serves Meta's Muse Glimmer 30B (dense 30B + 1.8B
+perception encoder, 131k native context) and pulls in three files from the one
+repo:
+
+| Part | File | Size | Notes |
+|------|------|------|-------|
+| Text model | `Muse-Glimmer-30B-UD-Q6_K_XL.gguf` | ~25 GB | selected by `-hf repo:QUANT` |
+| Perception encoder | `mmproj-...-Q8_0.gguf` | ~2.0 GB | loaded automatically; `--no-mmproj` opts out |
+| DFlash drafter | `dflash-kquant.gguf` | ~1.6 GB | must be named explicitly with `-md` |
+
+`-hf` downloads all three — it pulls the repo's auxiliary files alongside the
+model. The drafter still has to be *named* on the command line, and it can't be
+named with `-hfd/--hf-repo-draft`, because `dflash-kquant` is **not a valid
+Hugging Face quantization tag** (that endpoint 400s), so the lookup would fall
+back to the wrong file. The script therefore points `-md` at the copy in
+llama.cpp's cache, fetching it by URL itself only if it isn't there yet.
+
+DFlash is a *block-diffusion* drafter: it proposes a whole block of tokens per
+forward pass and the 30B verifies them in parallel, so decode speeds up with
+identical output. It requires `--spec-type draft-dflash` — not the `draft-simple`
+path used for ordinary same-family draft models.
+
+**Measured on the Spark** (Q6, 400-token generation, `temperature 0`):
+
+| Config | Decode | Draft acceptance |
+|--------|--------|------------------|
+| `SPEC=0` (off) | 8.24 t/s | — |
+| `SPEC=1`, `DRAFT_MAX=4` (default) | **17.68 t/s** (**2.1×**) | 0.40, mean len 2.58 |
+| `SPEC=1`, `DRAFT_MAX=8` | 16.67 t/s | 0.22, mean len 2.71 |
+| `SPEC=1`, `DRAFT_MAX=16` | 16.84 t/s | 0.13, mean len 2.81 |
+
+`DRAFT_MAX=4` measured fastest, so that's the default — a longer draft window
+raises the mean accepted length slightly but wastes more verification work.
+
+Reasoning text comes back in a separate `reasoning_content` field, not in
+`content`. It counts against `max_tokens`, so a small `max_tokens` can be fully
+consumed by reasoning and leave `content` empty.
+
+```bash
+./run-muse-glimmer.sh                    # Q6 + vision + speculative decoding, 4 slots
+QUANT=UD-Q4_K_XL ./run-muse-glimmer.sh   # 16 GB instead of 25 GB
+SPEC=0 ./run-muse-glimmer.sh             # disable speculative decoding
+MMPROJ=0 ./run-muse-glimmer.sh           # text-only (skips the 2.0 GB encoder)
+REASONING=high ./run-muse-glimmer.sh     # low | medium | high | xhigh
+PARALLEL=1 ./run-muse-glimmer.sh         # single slot
+```
+
+**Concurrency.** `--ctx-size` in llama.cpp is the *total* budget split across
+slots, so raising `--parallel` against a fixed total silently shrinks every
+slot — 4 slots against `-c 131072` leaves each request only 32768. `CTX` in
+this script is therefore **per slot** and the total is multiplied out, so
+`PARALLEL=4` really does mean 4 × 131072.
+
+Four slots is the default because the extra ones are free until used:
+
+| Load | Per request | Aggregate |
+|------|-------------|-----------|
+| 1 request | 15.7 t/s | 15.7 t/s |
+| 4 concurrent | 11.7–13.1 t/s | **~49 t/s (3.1×)** |
+
+A lone request measured the same at `PARALLEL=1`, `2`, and `4`, and the extra
+slots added no measurable memory — the model's alternating sliding-window
+layers (window 2048) keep the KV cache small, so only about half the layers
+hold the full context.
+
+Reasoning strength is set via `--chat-template-kwargs '{"reasoning_strength":...}'`
+and defaults to `low`. Requires a llama.cpp build **≥ b10353** (upstream #26841);
+`build.lock` pins b10375.
+
+> **Memory**: the Spark's 121 GB is shared with the sibling vLLM setup. The
+> `qwen36-27b` vLLM container alone holds ~85 GB, which does not leave room for
+> this model — `docker stop qwen36-27b` before starting it.
 
 ### Useful env vars (see `run.sh` header)
 
@@ -111,6 +188,9 @@ both tools keep their models under one directory.
 
 ## Notes
 
+- **Current pin**: release tag **`b10375`** (`ba360efe1`). Pinning a release tag
+  rather than tracking `master` keeps `build.lock` reproducible. Muse Glimmer
+  needs ≥ `b10353`.
 - **Verified baseline**: bare-metal build `c1304d7b2 (9671)` ran Qwen3.6-35B-A3B
   Q8 on the GB10 at ~697 t/s prefill / ~48 t/s decode, all layers on CUDA — this
   image reproduces that build inside a container.
