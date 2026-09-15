@@ -21,7 +21,8 @@
 # draft-simple path used by ordinary same-family speculative decoding.
 #
 # Requires a llama.cpp build >= b10353 (Muse Glimmer support, upstream #26841).
-# build.lock pins b10375; rebuild with ./build.sh --reproduce.
+# Measured on b10375 (rollback image llama-spark:ba360efe); build.lock now pins
+# the newer ggml-org/llama.cpp#28243 head. Rebuild with ./build.sh --reproduce.
 #
 # Usage:
 #   ./run-muse-glimmer.sh                    # foreground (Ctrl-C to stop)

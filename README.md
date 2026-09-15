@@ -45,7 +45,8 @@ with `-DCMAKE_CUDA_ARCHITECTURES=121a`, then ship the binary on a slim
 
 ```bash
 ./build.sh                 # latest llama.cpp master HEAD
-./build.sh --ref b10375    # a specific tag/branch/commit (current pin)
+./build.sh --ref b10375    # a specific tag/branch/commit (or a 40-char SHA)
+./build.sh --ref d1a92352cbd417fd840b4e765c0b82f5fe3d1d89   # current pin (PR #28243 head)
 ./build.sh --reproduce     # rebuild exactly what build.lock records
 ./build.sh --no-ui         # skip the embedded Web UI (no build-time HF fetch)
 ```
@@ -218,7 +219,8 @@ accounted for — `UD-IQ2_M` is the honest ceiling with DSpark on.
 
 Requires a llama.cpp build **≥ b10269**: b10228 added DeepSeek-V4 DSpark, but
 b10259–b10268 advertise `draft-dspark` and then abort while loading the drafter.
-`build.lock` pins b10375, clear of that window.
+Measured on b10375; the current `build.lock` pin (PR #28243 head, 427 commits
+past b10375) is clear of that window too.
 
 > **Memory**: weights + drafter are ~95 GiB of the shared 121 GiB. Nothing else
 > substantial can be resident — stop the sibling vLLM container first
@@ -296,7 +298,7 @@ hold the full context.
 
 Reasoning strength is set via `--chat-template-kwargs '{"reasoning_strength":...}'`
 and defaults to `low`. Requires a llama.cpp build **≥ b10353** (upstream #26841);
-`build.lock` pins b10375.
+measured on b10375, and the current `build.lock` pin is newer.
 
 > **Memory**: the Spark's 121 GB is shared with the sibling vLLM setup. The
 > `qwen36-27b` vLLM container alone holds ~85 GB, which does not leave room for
@@ -314,9 +316,21 @@ both tools keep their models under one directory.
 
 ## Notes
 
-- **Current pin**: release tag **`b10375`** (`ba360efe1`). Pinning a release tag
-  rather than tracking `master` keeps `build.lock` reproducible.
-  DeepSeek-V4-Flash DSpark needs ≥ `b10269`.
+- **Current pin**: commit **`d1a92352c`**, the head of the **unmerged** upstream PR
+  [ggml-org/llama.cpp#28243](https://github.com/ggml-org/llama.cpp/pull/28243)
+  ("models: Qwen3.8-Flash-Next MTP"; same commit as `danielhanchen/llama.cpp`
+  branch `qwen4exp/mtp`), 427 commits past `b10375`. It is needed for the
+  Qwen3.8-Flash-Next MTP head. This is a PR build, not a release: move
+  `build.lock` to the first release tag containing #28243 once it merges. The
+  Dockerfile's `git fetch --depth 1 origin <sha>` fetches the PR-head SHA
+  directly, so no Dockerfile change was needed. The image reports `build 1`
+  (shallow clone, no tag history) and its Web UI download falls back from
+  bucket `b1` to `latest`; both are harmless.
+- **Previous pin**: release tag `b10375` (`ba360efe1`), still tagged locally as
+  `llama-spark:ba360efe` for rollback (`IMAGE=llama-spark:ba360efe ./run-….sh`).
+  The DeepSeek-V4-Flash, Muse Glimmer, Gemma and Zeta runners were measured on
+  it and have not been re-verified on the PR build. DeepSeek-V4-Flash DSpark
+  needs ≥ `b10269`.
 - **Verified baseline**: bare-metal build `c1304d7b2 (9671)` ran Qwen3.6-35B-A3B
   Q8 on the GB10 at ~697 t/s prefill / ~48 t/s decode, all layers on CUDA — this
   image reproduces that build inside a container.
