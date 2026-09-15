@@ -180,9 +180,11 @@ served with llama.cpp.
 - **`--ctx-size` must be explicit.** `deepseek4.context_length` in the GGUF is
   `1048576`, and llama.cpp's default (`--ctx-size 0`) means *take it from the
   model* — which tries to size a million-token KV pool on top of 95 GiB of
-  weights and dies. `CTX` defaults to `32768`, and it is the **total** budget
-  llama.cpp splits across slots — raising `PARALLEL` divides it rather than
-  multiplying, because at ~95 GiB resident there is no memory to spare.
+  weights and dies. `CTX` defaults to `524288`, and it is the **total** budget
+  llama.cpp splits across slots: the default `PARALLEL=2` gives each slot
+  `262144`. Raise `CTX` in step with `PARALLEL`, or each slot's budget shrinks.
+  Context is cheap here (32768 → 262144 measured at only +977 MiB, since most
+  blocks use a 128-token sliding window), so the limit is prefill time, not memory.
 - **`--jinja` is not optional.** The base checkpoint ships **no chat template at
   all** — only a programmatic encoder (`encoding/encoding_dsv4.py`). The Jinja
   port Unsloth embedded in the GGUF is the only thing emitting the right control
@@ -202,7 +204,8 @@ served with llama.cpp.
   fallback if a future build regresses.
 
 ```bash
-./run-deepseek-v4-flash.sh                  # IQ2_M + DSpark, 32k ctx
+./run-deepseek-v4-flash.sh                  # IQ2_M + DSpark, 2 slots x 256K ctx
+PARALLEL=1 CTX=262144 ./run-deepseek-v4-flash.sh   # single slot, fastest single stream
 QUANT=UD-IQ1_M ./run-deepseek-v4-flash.sh   # 80.9 GiB instead of 84.7
 SPEC=0 ./run-deepseek-v4-flash.sh           # no drafter, frees ~10 GiB
 REASONING=high ./run-deepseek-v4-flash.sh   # none | high | max
