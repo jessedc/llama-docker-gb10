@@ -97,7 +97,9 @@ RUN --mount=type=cache,target=/ccache \
       -DLLAMA_BUILD_UI=${LLAMA_BUILD_UI} \
       -DLLAMA_USE_PREBUILT_UI=ON \
       -DLLAMA_UI_HF_BUCKET=ggml-org/llama-ui \
- && cmake --build build --config Release -j ${MAX_JOBS} --target llama-server
+ && cmake --build build --config Release -j ${MAX_JOBS} --target \
+      llama-server llama-cli llama-bench llama-quantize \
+      llama-imatrix llama-perplexity llama-gguf-split llama-tokenize
 
 # ---------------------------------------------------------------------------
 # Stage 2: runtime

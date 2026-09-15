@@ -86,6 +86,7 @@ docker build $NO_CACHE \
   --build-arg "LLAMA_REF=${LLAMA_COMMIT}" \
   --build-arg "CUDA_ARCH=${CUDA_ARCH}" \
   --build-arg "LLAMA_BUILD_UI=${BUILD_UI}" \
+  --build-arg "MAX_JOBS=${MAX_JOBS:-16}" \
   -t "$TAG" -t "${IMAGE_NAME}:latest" \
   .
 

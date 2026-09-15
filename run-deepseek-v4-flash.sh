@@ -38,6 +38,8 @@
 #   ./run-deepseek-v4-flash.sh                    # foreground (Ctrl-C to stop)
 #   QUANT=UD-IQ1_M ./run-deepseek-v4-flash.sh     # smaller quant, more headroom
 #   SPEC=0 ./run-deepseek-v4-flash.sh             # disable DSpark (frees ~10 GiB)
+#   PARALLEL=1 CTX=262144 ./run-deepseek-v4-flash.sh  # back to the single-slot
+#                                                 # config; fastest single stream
 #   REASONING=high ./run-deepseek-v4-flash.sh     # none | high | max
 #   CACHE_TYPE=f16 FLASH_ATTN=auto ./run-deepseek-v4-flash.sh   # fall back if a
 #                                                 # future build rejects q8_0 KV
@@ -57,8 +59,27 @@ IMAGE="${IMAGE:-llama-spark:latest}"
 REPO="unsloth/DeepSeek-V4-Flash-0731-GGUF"
 QUANT="${QUANT:-UD-IQ2_M}"             # 84.68 GiB; + 10.15 GiB drafter = 94.8 GiB resident
 PORT="${PORT:-8080}"
-CTX="${CTX:-32768}"                    # TOTAL across slots -- see the --ctx-size note below
-PARALLEL="${PARALLEL:-1}"              # 284B at ~95 GiB leaves little room for concurrency
+CTX="${CTX:-524288}"                   # TOTAL across slots -- see the --ctx-size note below.
+                                       # With PARALLEL=2 this is 262144 per slot, i.e. each slot
+                                       # gets exactly the budget the old single-slot config had.
+                                       # Measured on the Spark (q8_0 KV + DSpark drafter resident):
+                                       #   32768 ctx -> 97918 MiB     262144 ctx -> 98895 MiB
+                                       # 8x the context costs only +977 MiB, because most of the
+                                       # 43 blocks are sliding-window (attention.sliding_window=128,
+                                       # see also attention.compress_ratios) and so cost a CONSTANT
+                                       # amount regardless of ctx; only the full-attention minority
+                                       # scales. Fits ~672 MiB constant + ~4.4 KiB/token, leaving
+                                       # ~25 GiB free of the GB10's 124610 MiB.
+                                       # Native max is 1048576 (yarn x16 over a 65536 base) and by
+                                       # the same fit would land ~102 GiB -- also fits; prefill
+                                       # time, not memory, is what makes big ctx expensive here.
+PARALLEL="${PARALLEL:-2}"              # 2 concurrent slots. CTX is TOTAL and is divided by this,
+                                       # so CTX was doubled in step to keep 262144 per slot.
+                                       # Extra cost over 1 slot is small: the KV pool is sized by
+                                       # CTX regardless of slot count, so only the per-stream
+                                       # sliding-window caches (~672 MiB each) and the shared
+                                       # drafter's per-seq KV multiply -- roughly +1.5-2 GiB.
+                                       # Throughput is the real trade: see the batching note below.
 GPU_LAYERS="${GPU_LAYERS:-999}"        # 999 = offload every layer (whole model on GPU)
 REASONING="${REASONING:-none}"         # reasoning_effort: none | high | max
 DRAFT_MAX="${DRAFT_MAX:-3}"            # draft tokens per verify step; unsloth's measured default
@@ -138,8 +159,32 @@ fi
 # and llama.cpp's default (--ctx-size 0) means "take it from the model" -- which
 # on this box tries to size a million-token KV pool on top of 95 GiB of weights
 # and dies. Always pass an explicit budget. It is the TOTAL split across slots,
-# so PARALLEL>1 divides it rather than multiplying -- at ~95 GiB resident there
-# is no memory to spare for per-slot budgets.
+# so PARALLEL>1 divides it rather than multiplying: at PARALLEL=2 the default
+# CTX=524288 gives each slot 262144. Raise CTX, not PARALLEL alone, or slots
+# shrink under you -- context shift is OFF by default in this build, so a slot
+# that fills stops mid-generation with truncated=1 rather than sliding.
+#
+# WHAT PARALLEL=2 ACTUALLY COSTS (unmeasured -- see the measured table below for
+# the PARALLEL=1 baseline). Decode here is memory-bandwidth-bound, so batching
+# 2 streams does NOT cost 2x: the dense/attention weights are read once per step
+# and amortise across the batch. The MoE half does not amortise nearly as well
+# -- 2 tokens each pick 6 of 256 routed experts, and with 256 experts to choose
+# from the overlap is slight, so expert traffic nearly doubles. Expect aggregate
+# throughput up but short of 2x, and per-stream t/s to fall, when both slots run.
+#
+# DSpark compounds this. Verification already batches DRAFT_MAX+1 = 4 tokens per
+# slot; at PARALLEL=2 the step batch is up to 8. That is the same amortisation
+# headroom batching wants, so the drafter's measured +54% shrinks as concurrency
+# rises. If per-stream latency matters more than aggregate, lower DRAFT_MAX.
+#
+# Prefill, not decode, is the contention that bites: measured 335-350 t/s, so a
+# 47k-token prompt is ~140 s during which the other slots' decode is throttled
+# by the interleaved n_batch=2048 chunks.
+#
+# Slot selection is by prompt prefix similarity (-sps, default 0.10) and falls
+# back to LRU, so sequential turns of one conversation keep landing on the slot
+# holding their cache. Two unrelated conversations each get their own slot cache
+# within their own 262144 budget.
 #
 # KV geometry: head_count_kv=1 with key/value_length 512 (MLA-style compressed
 # latent) over 43 layers = ~44k elements/token, so ~86 KiB/token at f16 --
