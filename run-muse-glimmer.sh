@@ -33,8 +33,9 @@
 #   DETACH=1 ./run-muse-glimmer.sh           # background server, restarts on boot
 #   ./run-muse-glimmer.sh --ctx-size 262144  # append/override any llama-server flag
 #
-# NOTE: the sibling vLLM container (qwen36-27b) holds ~85 GB of the Spark's
-# shared 121 GB. Stop it first -- `docker stop qwen36-27b` -- or this won't fit.
+# NOTE: the Spark's 121 GB of unified memory is shared with anything else on
+# the box. Stop other GPU-heavy containers first -- `docker ps` then
+# `docker stop <name>` -- or this won't fit.
 #
 # Env: IMAGE, PORT (host), QUANT, CTX (per slot), PARALLEL, GPU_LAYERS, SPEC,
 #      DRAFT_MAX, MMPROJ, REASONING, HF_TOKEN, HF_HOME, DETACH.
@@ -121,8 +122,9 @@ if [[ "${SPEC:-1}" == 1 ]]; then
 fi
 
 # --- docker run ------------------------------------------------------------
-# Share one host model store with vLLM/llama.cpp (HF_HOME). The GGUFs download
-# via -hf into llama.cpp's cache under it; reused on later runs.
+# Keep models in the standard Hugging Face cache (HF_HOME, default
+# ~/.cache/huggingface), shared with any other HF tooling on the host. The GGUFs
+# download via -hf into llama.cpp's cache under it; reused on later runs.
 run_flags=(--gpus all --ipc=host -p "${PORT}:8080"
            -e "HF_TOKEN=${HF_TOKEN:-}"
            -v "${HF_HOME}:/root/.cache/huggingface"

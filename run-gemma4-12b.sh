@@ -2,8 +2,8 @@
 # Serve unsloth/gemma-4-12b-it-GGUF (a heavily-quantized Dynamic 2.0 build, by
 # default UD-Q4_K_XL) with the from-source llama.cpp server image on the DGX
 # Spark (GB10 / sm_121a). Dense Gemma 4 12B is a plain autoregressive model, so
-# this is a normal `llama-server` HTTP endpoint -- styled like the sibling
-# vLLM run-qwen3.6.sh: model pinned here, extra flags pass through.
+# this is a normal `llama-server` HTTP endpoint: model pinned here, extra
+# flags pass through.
 #
 # Usage:
 #   ./run-gemma4-12b.sh                    # foreground (Ctrl-C to stop)
@@ -44,8 +44,9 @@ server_args=(
 )
 
 # --- docker run ------------------------------------------------------------
-# Share one host model store with vLLM/llama.cpp (HF_HOME). The GGUF downloads
-# via -hf into llama.cpp's flat cache under it; reused on later runs.
+# Keep models in the standard Hugging Face cache (HF_HOME, default
+# ~/.cache/huggingface), shared with any other HF tooling on the host. The GGUF
+# downloads via -hf into llama.cpp's flat cache under it; reused on later runs.
 run_flags=(--gpus all --ipc=host -p "${PORT}:8080"
            -e "HF_TOKEN=${HF_TOKEN:-}"
            -v "${HF_HOME}:/root/.cache/huggingface"
