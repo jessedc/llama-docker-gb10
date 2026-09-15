@@ -59,7 +59,7 @@ is mounted as a BuildKit cache so rebuilds are fast.
 ./run.sh ggml-org/gemma-3-4b-it-GGUF
 
 # Serve a local GGUF (its directory is mounted read-only)
-./run.sh /home/jesse/Development/models/<model>.gguf
+./run.sh /path/to/models/<model>.gguf
 
 # Extra llama-server flags pass straight through
 ./run.sh ggml-org/gemma-3-4b-it-GGUF --ctx-size 32768 --parallel 4
@@ -99,6 +99,7 @@ QUANT=UD-Q5_K_XL ./run-gemma4-12b.sh   # override the quant
 ./run-zeta-2.sh                        # bartowski/zed-industries_zeta-2-GGUF (Q8_0)
 DETACH=1 ./run-zeta-2.sh               # background server, restarts on boot
 ./run-deepseek-v4-flash.sh             # unsloth/DeepSeek-V4-Flash-0731-GGUF (UD-IQ2_M)
+./run-muse-glimmer.sh                  # unsloth/Muse-Glimmer-30B-GGUF (UD-Q6_K_XL)
 ```
 
 #### DeepSeek-V4-Flash-0731 — 284B MoE + DSpark speculative decoding
@@ -222,8 +223,6 @@ b10259–b10268 advertise `draft-dspark` and then abort while loading the drafte
 > **Memory**: weights + drafter are ~95 GiB of the shared 121 GiB. Nothing else
 > substantial can be resident — stop any other GPU-heavy containers first
 > (`docker ps`, then `docker stop <name>`).
-./run-muse-glimmer.sh                  # unsloth/Muse-Glimmer-30B-GGUF (UD-Q6_K_XL)
-```
 
 #### Muse Glimmer 30B — vision + speculative decoding
 
