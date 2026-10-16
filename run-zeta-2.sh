@@ -37,8 +37,9 @@ server_args=(
 )
 
 # --- docker run ------------------------------------------------------------
-# Share one host model store with vLLM/llama.cpp (HF_HOME). The GGUF downloads
-# via -hf into llama.cpp's flat cache under it; reused on later runs.
+# Keep models in the standard Hugging Face cache (HF_HOME, default
+# ~/.cache/huggingface), shared with any other HF tooling on the host. The GGUF
+# downloads via -hf into llama.cpp's flat cache under it; reused on later runs.
 run_flags=(--gpus all --ipc=host -p "${PORT}:8080"
            -e "HF_TOKEN=${HF_TOKEN:-}"
            -v "${HF_HOME}:/root/.cache/huggingface"
