@@ -12,10 +12,10 @@
 #   PORT           host port               (default: 8080)
 #   GPU_LAYERS     -ngl / layers on GPU    (default: 999 = all)
 #   HF_TOKEN       Hugging Face token for gated/private repos
-#   HF_HOME        shared host model cache (default: ~/.cache/huggingface,
-#                  same dir/default as the sibling vLLM setup -> one common
-#                  model store). llama.cpp's -hf cache lands in a llama.cpp/
-#                  subdir of it (its flat layout differs from the HF hub layout).
+#   HF_HOME        shared host model cache (default: ~/.cache/huggingface, the
+#                  standard HF cache, shared with any other HF tooling on the
+#                  host). llama.cpp's -hf cache lands in a llama.cpp/ subdir of
+#                  it (its flat layout differs from the HF hub layout).
 #   DETACH=1       run detached + restart (server mode) instead of interactive
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -74,8 +74,8 @@ if [[ -e "$MODEL" ]]; then
   server_args+=(-m "/models/${base}")
   echo ">> serving local model /models/${base}"
 else
-  # Treat as a Hugging Face repo (optionally repo:quant). Share one host model
-  # store with vLLM (HF_HOME, default ~/.cache/huggingface).
+  # Treat as a Hugging Face repo (optionally repo:quant). Use the standard HF
+  # cache (HF_HOME, default ~/.cache/huggingface), shared with other HF tooling.
   mkdir -p "$HF_HOME"
   cached_gguf="$(resolve_cached_gguf "$MODEL")"
   if [[ -n "$cached_gguf" ]]; then

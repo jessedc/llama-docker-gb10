@@ -15,9 +15,8 @@
 #
 # Why build instead of `docker pull`: the official ghcr.io/ggml-org/llama.cpp
 # CUDA images default to CUDA 12 (no sm_121 support at all) and the -cuda13
-# variants are not GPU-CI-tested nor tuned for sm_121a. Building here is the
-# same "pin a known-good CUDA base, recompile kernels for sm_121a" approach
-# used for the vLLM Spark image.
+# variants are not GPU-CI-tested nor tuned for sm_121a. Building here means we
+# pin a known-good CUDA base and recompile the kernels for sm_121a.
 
 ARG CUDA_VERSION=13.0.3
 ARG UBUNTU_VERSION=ubuntu24.04

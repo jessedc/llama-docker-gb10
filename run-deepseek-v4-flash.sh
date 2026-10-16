@@ -47,8 +47,8 @@
 #   ./run-deepseek-v4-flash.sh --ctx-size 65536   # append/override any llama-server flag
 #
 # NOTE: weights + drafter are ~95 GiB of the Spark's shared 121 GiB. Nothing
-# else substantial can be resident. Stop any sibling vLLM container first --
-# `docker ps` then `docker stop <name>` (currently qwen38-27b-prismaaqua, ~60 GiB).
+# else substantial can be resident. Stop other GPU-heavy containers first --
+# `docker ps` then `docker stop <name>`.
 #
 # Env: IMAGE, PORT (host), QUANT, CTX, PARALLEL, GPU_LAYERS, SPEC, DRAFT_MAX,
 #      REASONING, FLASH_ATTN, CACHE_TYPE, HF_TOKEN, HF_HOME, DETACH.
@@ -258,9 +258,11 @@ if [[ "${SPEC:-1}" == 1 ]]; then
 fi
 
 # --- docker run ------------------------------------------------------------
-# Share one host model store with vLLM/llama.cpp (HF_HOME). The GGUF shards
-# download via -hf into llama.cpp's cache under it; reused on later runs. The
-# first run pulls ~85 GiB, so expect a long wait before the server binds.
+# Keep models in the standard Hugging Face cache (HF_HOME, default
+# ~/.cache/huggingface), shared with any other HF tooling on the host. The GGUF
+# shards download via -hf into llama.cpp's cache under it; reused on later
+# runs. The first run pulls ~85 GiB, so expect a long wait before the server
+# binds.
 run_flags=(--gpus all --ipc=host -p "${PORT}:8080"
            -e "HF_TOKEN=${HF_TOKEN:-}"
            -v "${HF_HOME}:/root/.cache/huggingface"

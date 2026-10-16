@@ -3,9 +3,8 @@
 From-source, reproducible Docker build of the llama.cpp **server** for the
 NVIDIA DGX Spark (GB10 Grace Blackwell, `sm_121a`), built with CUDA 13.
 
-Same shape as the sibling `~/vllm/` setup: pin a known-good CUDA base image,
-recompile the GPU kernels for this exact chip, and record the pins in
-`build.lock` for reproducible rebuilds.
+The approach: pin a known-good CUDA base image, recompile the GPU kernels for
+this exact chip, and record the pins in `build.lock` for reproducible rebuilds.
 
 ## Prerequisites
 
@@ -60,7 +59,7 @@ is mounted as a BuildKit cache so rebuilds are fast.
 ./run.sh ggml-org/gemma-3-4b-it-GGUF
 
 # Serve a local GGUF (its directory is mounted read-only)
-./run.sh /home/jesse/Development/models/<model>.gguf
+./run.sh /path/to/models/<model>.gguf
 
 # Extra llama-server flags pass straight through
 ./run.sh ggml-org/gemma-3-4b-it-GGUF --ctx-size 32768 --parallel 4
@@ -83,9 +82,9 @@ curl localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
 If a GGUF for a repo is already in the shared HF cache (e.g. you ran
 `hf download ggml-org/gemma-3-4b-it-GGUF gemma-3-4b-it-Q8_0.gguf`), `run.sh`
 detects it and serves it **in place** (`-m`) instead of re-downloading — so the
-same file can also be used by vLLM's GGUF loader. Pin a quant with `repo:QUANT`
-(e.g. `./run.sh ggml-org/gemma-3-4b-it-GGUF:Q8_0`); sharded models resolve to
-the first shard automatically.
+same file stays usable by any other tool reading the HF cache. Pin a quant with
+`repo:QUANT` (e.g. `./run.sh ggml-org/gemma-3-4b-it-GGUF:Q8_0`); sharded models
+resolve to the first shard automatically.
 
 ### Pinned per-model runners
 
@@ -100,6 +99,7 @@ QUANT=UD-Q5_K_XL ./run-gemma4-12b.sh   # override the quant
 ./run-zeta-2.sh                        # bartowski/zed-industries_zeta-2-GGUF (Q8_0)
 DETACH=1 ./run-zeta-2.sh               # background server, restarts on boot
 ./run-deepseek-v4-flash.sh             # unsloth/DeepSeek-V4-Flash-0731-GGUF (UD-IQ2_M)
+./run-muse-glimmer.sh                  # unsloth/Muse-Glimmer-30B-GGUF (UD-Q6_K_XL)
 ```
 
 #### DeepSeek-V4-Flash-0731 — 284B MoE + DSpark speculative decoding
@@ -171,18 +171,20 @@ published re-quantization, only three artifacts fit a 128 GB single-Spark:
 | NVFP4 / W4A16 / GPTQ-Int4 / AutoRound | 142–170 GiB | vLLM | do not fit |
 
 vLLM v0.27.1 *does* register `DeepseekV4ForCausalLM` and `DSparkDraftModel`, so
-the sibling `~/vllm/` setup is not the blocker — the weights are. Since DSpark
-is the biggest decode lever available and only the GGUF path can use it here,
-this model lives in llama-docker.
+the engine is not the blocker — the weights are. Since DSpark is the biggest
+decode lever available and only the GGUF path can use it here, this model is
+served with llama.cpp.
 
 ##### Load-bearing flags
 
 - **`--ctx-size` must be explicit.** `deepseek4.context_length` in the GGUF is
   `1048576`, and llama.cpp's default (`--ctx-size 0`) means *take it from the
   model* — which tries to size a million-token KV pool on top of 95 GiB of
-  weights and dies. `CTX` defaults to `32768`, and it is the **total** budget
-  llama.cpp splits across slots — raising `PARALLEL` divides it rather than
-  multiplying, because at ~95 GiB resident there is no memory to spare.
+  weights and dies. `CTX` defaults to `524288`, and it is the **total** budget
+  llama.cpp splits across slots: the default `PARALLEL=2` gives each slot
+  `262144`. Raise `CTX` in step with `PARALLEL`, or each slot's budget shrinks.
+  Context is cheap here (32768 → 262144 measured at only +977 MiB, since most
+  blocks use a 128-token sliding window), so the limit is prefill time, not memory.
 - **`--jinja` is not optional.** The base checkpoint ships **no chat template at
   all** — only a programmatic encoder (`encoding/encoding_dsv4.py`). The Jinja
   port Unsloth embedded in the GGUF is the only thing emitting the right control
@@ -202,7 +204,8 @@ this model lives in llama-docker.
   fallback if a future build regresses.
 
 ```bash
-./run-deepseek-v4-flash.sh                  # IQ2_M + DSpark, 32k ctx
+./run-deepseek-v4-flash.sh                  # IQ2_M + DSpark, 2 slots x 256K ctx
+PARALLEL=1 CTX=262144 ./run-deepseek-v4-flash.sh   # single slot, fastest single stream
 QUANT=UD-IQ1_M ./run-deepseek-v4-flash.sh   # 80.9 GiB instead of 84.7
 SPEC=0 ./run-deepseek-v4-flash.sh           # no drafter, frees ~10 GiB
 REASONING=high ./run-deepseek-v4-flash.sh   # none | high | max
@@ -221,11 +224,8 @@ b10259–b10268 advertise `draft-dspark` and then abort while loading the drafte
 `build.lock` pins b10375, clear of that window.
 
 > **Memory**: weights + drafter are ~95 GiB of the shared 121 GiB. Nothing else
-> substantial can be resident — stop the sibling vLLM container first
-> (`docker ps`; at time of writing that is `docker stop qwen38-27b-prismaaqua`,
-> which alone holds ~60 GiB).
-./run-muse-glimmer.sh                  # unsloth/Muse-Glimmer-30B-GGUF (UD-Q6_K_XL)
-```
+> substantial can be resident — stop any other GPU-heavy containers first
+> (`docker ps`, then `docker stop <name>`).
 
 #### Muse Glimmer 30B — vision + speculative decoding
 
@@ -298,19 +298,20 @@ Reasoning strength is set via `--chat-template-kwargs '{"reasoning_strength":...
 and defaults to `low`. Requires a llama.cpp build **≥ b10353** (upstream #26841);
 `build.lock` pins b10375.
 
-> **Memory**: the Spark's 121 GB is shared with the sibling vLLM setup. The
-> `qwen36-27b` vLLM container alone holds ~85 GB, which does not leave room for
-> this model — `docker stop qwen36-27b` before starting it.
+> **Memory**: the Spark's 121 GB of unified memory is shared with anything else
+> running on the box. Another large model already resident will not leave room
+> for this one — stop other GPU-heavy containers first (`docker ps`, then
+> `docker stop <name>`).
 
 ### Useful env vars (see `run.sh` header)
 
 `IMAGE`, `PORT` (8080), `GPU_LAYERS` (999=all), `HF_TOKEN`, `HF_HOME`, `DETACH`.
 
-`-hf` downloads share one host model store with the sibling vLLM setup:
-`HF_HOME` defaults to `~/.cache/huggingface` (same as vLLM). llama.cpp's flat
-`-hf` cache lands in a `llama.cpp/` subdir of it — its layout differs from the
-HF hub `models--org--repo` layout, so files aren't deduped across the two, but
-both tools keep their models under one directory.
+`-hf` downloads go into the standard Hugging Face cache: `HF_HOME` defaults to
+`~/.cache/huggingface`, shared with any other HF tooling on the host. llama.cpp's
+flat `-hf` cache lands in a `llama.cpp/` subdir of it — its layout differs from
+the HF hub `models--org--repo` layout, so files aren't deduped across the two,
+but all models stay under one directory.
 
 ## Notes
 
