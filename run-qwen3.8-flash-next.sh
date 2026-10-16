@@ -7,11 +7,11 @@
 #
 # Three files from the one repo are involved:
 #   - the target model    UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-*.gguf  (87.24 GiB, 3 shards)
-#   - the MTP head        MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf  (1.78 GiB)
+#   - the MTP head        MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf         (2.59 GiB)
 #   - the vision encoder  mmproj-F16.gguf                                (0.84 GiB)
 #
 # `hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-IQ4_XS/*" \
-#    --include "MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf" --include "mmproj-F16.gguf"`
+#    --include "MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf" --include "mmproj-F16.gguf"`
 # pre-stages all three into $HF_HOME/hub and the script serves them in place.
 #
 # WHY UD-IQ4_XS
@@ -24,33 +24,22 @@
 # THE MTP HEAD
 # The model's own multi-token-prediction layer, extracted to a separate GGUF.
 # It drafts the next token(s) and the 125B verifies them in one pass: identical
-# output, faster decode. `shared-` heads borrow the token embedding and output
-# projection from the loaded target instead of carrying copies (0.82 GiB less
-# than the self-contained Q4_K_M; drafts identically). Q4_K_M rather than
-# Unsloth's recommended shared-Q8_0 trades ~2 points of acceptance (their B200
-# numbers: 64.4% vs 66.1%) for another 0.82 GiB of headroom.
+# output, faster decode. It must be a SELF-CONTAINED head (carries its own
+# token embedding). Mainline loads tok_embd as a required tensor, so the
+# repo's `shared-` heads, which borrowed it from the target under the old
+# PR #28243 build, do not load on mainline. Unsloth re-exported the
+# self-contained heads for mainline on 2026-10-05. Q4_K_M rather than Q8_0
+# (3.85 GiB, also copied to the repo root for -hf auto-discovery) keeps
+# 1.26 GiB of headroom for ~2 points of acceptance.
 #
-# -md is ALWAYS passed explicitly. The head lives in the repo's MTP/ subfolder,
-# which sidecar auto-discovery does not search, so `--spec-type draft-mtp` on
-# its own finds nothing and silently runs at target-only speed. So the head is
-# resolved to a path here, the same way run-deepseek-v4-flash.sh resolves its
-# DSpark drafter.
+# -md is ALWAYS passed explicitly. With -m (a pre-staged hub file) there is
+# no sidecar auto-discovery, and `--spec-type draft-mtp` on its own then runs
+# silently at target-only speed. So the head is resolved to a path here, the
+# same way run-deepseek-v4-flash.sh resolves its DSpark drafter. Confirm
+# speculation with `draft acceptance = ...` in `docker logs`.
 #
-# This build logs these two lines at startup. They are EXPECTED:
-#   E llama_init_from_model: failed to initialize the context: qwen4exp requires ctx_other to be set (this warning is normal during memory fitting)
-#   W operator(): failed to measure the memory of the extra model, fitting without it: ...
-# (Unsloth's MTP README shows a `borrow_shared_tensor: this model is a draft
-# head` variant; same cause.) The auto-fit tries to size the head on its own,
-# before the target exists, so there is nothing for it to borrow from.
-# Speculation still runs. Confirm it with `draft acceptance = ...` in
-# `docker logs`. The one consequence is that the fit leaves out the head's
-# memory, which is why -c and -ngl are always passed explicitly here.
-#
-# REQUIRES AN UNMERGED llama.cpp BUILD. Mainline has no MTP graph for `qwen4exp`
-# and no cross-model tensor borrowing, so a stock build cannot use the head.
-# build.lock pins d1a92352, the head of ggml-org/llama.cpp#28243 ("models:
-# Qwen3.8-Flash-Next MTP"). Move to a release tag once that PR lands.
-# ./build.sh --reproduce.
+# REQUIRES llama.cpp WITH ggml-org/llama.cpp#29761 ("Qwen4Exp: add MTP",
+# merged 2026-10-01). build.lock pins release b11696; ./build.sh --reproduce.
 #
 # Usage:
 #   ./run-qwen3.8-flash-next.sh                    # foreground (Ctrl-C to stop)
@@ -60,6 +49,7 @@
 #   REASONING=none ./run-qwen3.8-flash-next.sh     # none | low | medium | xhigh | default
 #   DRAFT_MAX=3 ./run-qwen3.8-flash-next.sh        # draft tokens per verify step
 #   DETACH=1 ./run-qwen3.8-flash-next.sh           # background server, restarts on boot
+#   ALIAS=qwen ./run-qwen3.8-flash-next.sh         # model id reported by /v1/models
 #   ./run-qwen3.8-flash-next.sh --ctx-size 65536   # append/override any llama-server flag
 #
 # NOTE: this config holds ~76 GiB of GPU buffers plus the 26.8 GiB PLE table in
@@ -68,12 +58,13 @@
 # `docker stop <name>`).
 #
 # Env: IMAGE, PORT (host), QUANT, CTX, PARALLEL, GPU_LAYERS, SPEC, DRAFT_MAX,
-#      MMPROJ, REASONING, FLASH_ATTN, CACHE_TYPE, HF_TOKEN, HF_HOME, DETACH.
+#      MMPROJ, REASONING, FLASH_ATTN, CACHE_TYPE, ALIAS, HF_TOKEN, HF_HOME, DETACH.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 IMAGE="${IMAGE:-llama-spark:latest}"
 REPO="unsloth/Qwen3.8-Flash-Next-GGUF"
+ALIAS="${ALIAS:-Qwen3.8-Flash-Next}"  # API model id; without it, -m reports the shard filename
 QUANT="${QUANT:-UD-IQ4_XS}"            # 87.24 GiB (61.2 GiB on GPU + 26.8 GiB PLE mmap)
 PORT="${PORT:-8080}"
 CTX="${CTX:-524288}"                   # TOTAL across slots: 2 x 262144 (native max per slot).
@@ -155,7 +146,7 @@ TARGET_HOST="$(resolve_cached_gguf "$REPO" "*${QUANT}*.gguf")"
 
 DRAFT_CTR_PATH=""
 if [[ "${SPEC:-1}" == 1 ]]; then
-  DRAFT_CTR_PATH="$(resolve_aux MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf 1907151936)"
+  DRAFT_CTR_PATH="$(resolve_aux MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf 2786204800)"
 fi
 
 MMPROJ_CTR_PATH=""
@@ -165,20 +156,26 @@ fi
 
 # --- llama-server options --------------------------------------------------
 # --ctx-size is TOTAL across slots, so PARALLEL>1 divides it. Raise CTX along
-# with PARALLEL or every slot shrinks. Always pass it: auto-fit does not count
-# the MTP head (see the startup-log note above).
+# with PARALLEL or every slot shrinks. Always pass it: the measured layout
+# below depends on it, and auto-fit would size ctx from free memory.
 #
 # MEMORY. The 26.8 GiB per_layer_token_embd (PLE) tensor is NOT copied to the
 # GPU. llama.cpp keeps it CPU_Mapped with lazy reads, so it lives in the page
 # cache and shows up in neither nvidia-smi nor free's "used". Measured at these
-# defaults: 77480 MiB GPU at boot, and free "used" rose from 84.2 to 90.4 GiB
+# defaults: 77770 MiB GPU at boot on b11696 (77480 with the old shared head
+# on the PR build), and free "used" rose from 84.2 to 90.4 GiB
 # over a benchmark session, most likely as the host-RAM prompt cache filled
 # (its default --cache-ram cap is 8192 MiB). Budget ~76 GiB GPU + 26.8 GiB PLE + up to 8 GiB
 # prompt cache. Squeeze it and the kernel evicts PLE pages to SSD. That should
 # still work, but slower (unmeasured).
 #
-# Measured on this box (image d1a92352, UD-IQ4_XS, q8_0 KV, -fa on, warm,
-# single stream). "greedy" = temp 0, no thinking, 400 tokens, mean of 2 warm
+# Re-measured on b11696 (image ceefd16d, self-contained Q4_K_M head), same
+# method as the table that follows:
+#   SPEC=0       greedy 29.4 t/s            think 29.2 t/s
+#   DRAFT_MAX=2  greedy 43.5 t/s 1.48x 73%  think 37.9 t/s 1.30x 58%
+#
+# Measured on this box (image d1a92352 / PR #28243, shared-Q4_K_M head,
+# UD-IQ4_XS, q8_0 KV, -fa on, warm, single stream). "greedy" = temp 0, no thinking, 400 tokens, mean of 2 warm
 # runs on a code/explanation prompt. "think" = the server defaults below
 # (temp 1.0, template-default xhigh effort), 600 tokens, mean of 3 seeds.
 #
@@ -244,6 +241,7 @@ fi
 # against max_tokens. Vision (verified): an image request is described
 # correctly with the head active (draft acceptance logged).
 server_args=(
+  --alias "${ALIAS}"
   -ngl "${GPU_LAYERS}"
   --ctx-size "${CTX}"
   --flash-attn "${FLASH_ATTN}"

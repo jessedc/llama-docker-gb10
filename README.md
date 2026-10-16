@@ -39,15 +39,14 @@ with `-DCMAKE_CUDA_ARCHITECTURES=121a`, then ship the binary on a slim
 | `run-zeta-2.sh` | Pinned runner for `bartowski/zed-industries_zeta-2-GGUF` (default `Q8_0`). |
 | `run-deepseek-v4-flash.sh` | Pinned runner for `unsloth/DeepSeek-V4-Flash-0731-GGUF` (default `UD-IQ2_M`), with DSpark speculative decoding. |
 | `run-muse-glimmer.sh` | Pinned runner for `unsloth/Muse-Glimmer-30B-GGUF` (default `UD-Q6_K_XL`), with vision + DFlash speculative decoding. |
-| `run-qwen3.8-flash-next.sh` | Pinned runner for `unsloth/Qwen3.8-Flash-Next-GGUF` (default `UD-IQ4_XS`), with vision + MTP speculative decoding. Needs the PR #28243 build. |
+| `run-qwen3.8-flash-next.sh` | Pinned runner for `unsloth/Qwen3.8-Flash-Next-GGUF` (default `UD-IQ4_XS`), with vision + MTP speculative decoding. |
 | `build.lock`  | Generated pins for `./build.sh --reproduce`. |
 
 ## Build
 
 ```bash
 ./build.sh                 # latest llama.cpp master HEAD
-./build.sh --ref b10375    # a specific tag/branch/commit (or a 40-char SHA)
-./build.sh --ref d1a92352cbd417fd840b4e765c0b82f5fe3d1d89   # current pin (PR #28243 head)
+./build.sh --ref b11696    # a specific tag/branch/commit (current pin; or a 40-char SHA)
 ./build.sh --reproduce     # rebuild exactly what build.lock records
 ./build.sh --no-ui         # skip the embedded Web UI (no build-time HF fetch)
 ```
@@ -221,8 +220,7 @@ accounted for — `UD-IQ2_M` is the honest ceiling with DSpark on.
 
 Requires a llama.cpp build **≥ b10269**: b10228 added DeepSeek-V4 DSpark, but
 b10259–b10268 advertise `draft-dspark` and then abort while loading the drafter.
-Measured on b10375; the current `build.lock` pin (PR #28243 head, 427 commits
-past b10375) is clear of that window too.
+Measured on b10375; the current `build.lock` pin (b11696) is clear of that window too.
 
 > **Memory**: weights + drafter are ~95 GiB of the shared 121 GiB. Nothing else
 > substantial can be resident — stop the sibling vLLM container first
@@ -315,41 +313,49 @@ context, hybrid thinking, multimodal) and pulls three files from the one repo:
 | Part | File | Size | Notes |
 |------|------|------|-------|
 | Target model | `UD-IQ4_XS/…-UD-IQ4_XS-*.gguf` (3 shards) | 87.24 GiB | 61.2 GiB goes to the GPU; the 26.8 GiB per-layer-embedding table stays mmapped |
-| MTP head | `MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf` | 1.78 GiB | must be named explicitly with `-md` |
+| MTP head | `MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf` | 2.59 GiB | must be named explicitly with `-md` |
 | Vision encoder | `mmproj-F16.gguf` | 0.84 GiB | `MMPROJ=0` opts out |
 
 ```bash
 hf download unsloth/Qwen3.8-Flash-Next-GGUF --include "UD-IQ4_XS/*" \
-  --include "MTP/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf" --include "mmproj-F16.gguf"
+  --include "MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf" --include "mmproj-F16.gguf"
 ```
 
 This pre-stages all ~90 GiB into `$HF_HOME/hub`, and the script serves it in
 place. Without it, the script falls back to `-hf` for the target and fetches the
 head and encoder by URL (that path is untested).
 
-**Needs the unmerged llama.cpp build.** Mainline has no MTP graph for `qwen4exp`
-and no cross-model tensor borrowing, so a stock build cannot use the head.
-`build.lock` pins the head of
-[ggml-org/llama.cpp#28243](https://github.com/ggml-org/llama.cpp/pull/28243);
-move it to a release tag once that PR merges.
+**Needs llama.cpp with
+[ggml-org/llama.cpp#29761](https://github.com/ggml-org/llama.cpp/pull/29761)**
+("Qwen4Exp: add MTP", merged 2026-10-01). `build.lock` pins release `b11696`.
+The earlier PR #28243 build this runner started on was closed unmerged.
 
-**The MTP head** is the model's own multi-token-prediction layer. A `shared-` head
-borrows the target's token embedding and output projection instead of carrying
-copies. `Q4_K_M` is used rather than Unsloth's recommended `shared-Q8_0`, trading
-~2 points of acceptance for 0.82 GiB of headroom. Two things to know:
+**The MTP head** is the model's own multi-token-prediction layer. It must be a
+**self-contained** head: mainline requires the head to carry its own token
+embedding, so the repo's `shared-` heads (which borrowed it from the target on
+the #28243 build) don't load. Unsloth re-exported the self-contained heads for
+mainline on 2026-10-05. `Q4_K_M` is used rather than `Q8_0` (3.85 GiB; also at
+the repo root for `-hf` auto-discovery), trading ~2 points of acceptance for
+1.26 GiB of headroom. Two things to know:
 
-- **`-md` is always passed explicitly.** The head lives in the `MTP/` subfolder,
-  which sidecar auto-discovery doesn't search, so `--spec-type draft-mtp` alone
-  silently runs without speculation. Check for `draft acceptance = …` in
+- **`-md` is always passed explicitly.** Serving a pre-staged file with `-m`
+  skips sidecar auto-discovery, so `--spec-type draft-mtp` alone silently runs
+  without speculation. Check for `draft acceptance = …` in
   `docker logs qwen3.8-flash-next`.
-- **One `E … qwen4exp requires ctx_other to be set` line at startup is expected**,
-  followed by `failed to measure the memory of the extra model`. The auto-fit
-  sizes the head before the target it borrows from exists. Speculation works,
-  but the fit ignores the head's memory, so the script always passes `-c` and
-  `-ngl` itself.
+- **The model id is `Qwen3.8-Flash-Next`** (`--alias`; override with `ALIAS=`).
+  Without it, serving with `-m` reports the first shard's filename.
 
-**Measured on the Spark** (image `d1a92352`, `UD-IQ4_XS`, q8_0 KV, `-fa on`, warm,
-single stream). *Greedy* is temperature 0 with thinking off, 400 tokens.
+**Re-measured on b11696** (image `ceefd16d`, self-contained `Q4_K_M` head, same
+method as below; 77,770 MiB GPU at boot):
+
+| Config | Greedy | Accepted | Think | Accepted |
+|--------|--------|----------|-------|----------|
+| `SPEC=0` | 29.4 t/s | — | 29.2 t/s | — |
+| `DRAFT_MAX=2` (default) | 43.5 t/s (**1.48×**) | 73% | **37.9 t/s (1.30×)** | 58% |
+
+**Measured on the Spark** with the earlier PR #28243 build (image `d1a92352`,
+`shared-Q4_K_M` head, `UD-IQ4_XS`, q8_0 KV, `-fa on`, warm, single stream).
+*Greedy* is temperature 0 with thinking off, 400 tokens.
 *Think* is the server defaults (temperature 1.0, template-default `xhigh`
 effort), 600 tokens, mean of 3 seeds.
 
@@ -440,20 +446,14 @@ both tools keep their models under one directory.
 
 ## Notes
 
-- **Current pin**: commit **`d1a92352c`**, the head of the **unmerged** upstream PR
-  [ggml-org/llama.cpp#28243](https://github.com/ggml-org/llama.cpp/pull/28243)
-  ("models: Qwen3.8-Flash-Next MTP"; same commit as `danielhanchen/llama.cpp`
-  branch `qwen4exp/mtp`), 427 commits past `b10375`. It is needed for the
-  Qwen3.8-Flash-Next MTP head. This is a PR build, not a release: move
-  `build.lock` to the first release tag containing #28243 once it merges. The
-  Dockerfile's `git fetch --depth 1 origin <sha>` fetches the PR-head SHA
-  directly, so no Dockerfile change was needed. The image reports `build 1`
-  (shallow clone, no tag history) and its Web UI download falls back from
-  bucket `b1` to `latest`; both are harmless.
-- **Previous pin**: release tag `b10375` (`ba360efe1`), still tagged locally as
-  `llama-spark:ba360efe` for rollback (`IMAGE=llama-spark:ba360efe ./run-….sh`).
-  The DeepSeek-V4-Flash, Muse Glimmer, Gemma and Zeta runners were measured on
-  it and have not been re-verified on the PR build. DeepSeek-V4-Flash DSpark
+- **Current pin**: release tag **`b11696`** (`ceefd16da`), which includes
+  mainline Qwen3.8-Flash-Next MTP
+  ([ggml-org/llama.cpp#29761](https://github.com/ggml-org/llama.cpp/pull/29761)).
+- **Previous pins**, still tagged locally for rollback
+  (`IMAGE=llama-spark:<tag> ./run-….sh`): `d1a92352` (head of the closed,
+  unmerged PR #28243; the only build that loads the `shared-` MTP heads) and
+  `ba360efe` (release `b10375`). The DeepSeek-V4-Flash, Muse Glimmer, Gemma and
+  Zeta runners were measured on `b10375` and have not been re-verified since. DeepSeek-V4-Flash DSpark
   needs ≥ `b10269`.
 - **Verified baseline**: bare-metal build `c1304d7b2 (9671)` ran Qwen3.6-35B-A3B
   Q8 on the GB10 at ~697 t/s prefill / ~48 t/s decode, all layers on CUDA — this
