@@ -39,13 +39,14 @@
 # speculation with `draft acceptance = ...` in `docker logs`.
 #
 # REQUIRES llama.cpp WITH ggml-org/llama.cpp#29761 ("Qwen4Exp: add MTP",
-# merged 2026-10-01). build.lock pins release b11696; ./build.sh --reproduce.
+# merged 2026-10-01). build.lock pins release b11881; ./build.sh --reproduce.
 #
 # Usage:
 #   ./run-qwen3.8-flash-next.sh                    # foreground (Ctrl-C to stop)
 #   SPEC=0 ./run-qwen3.8-flash-next.sh             # no MTP head (~-3 GiB, 1.3-1.6x slower)
 #   MMPROJ=0 ./run-qwen3.8-flash-next.sh           # text-only (-1.1 GiB)
 #   PARALLEL=1 CTX=262144 ./run-qwen3.8-flash-next.sh  # single slot, -5.5 GiB
+#   CACHE_RAM=8192 ./run-qwen3.8-flash-next.sh     # llama.cpp's default prompt-cache cap
 #   REASONING=none ./run-qwen3.8-flash-next.sh     # none | low | medium | xhigh | default
 #   DRAFT_MAX=3 ./run-qwen3.8-flash-next.sh        # draft tokens per verify step
 #   DETACH=1 ./run-qwen3.8-flash-next.sh           # background server, restarts on boot
@@ -58,7 +59,8 @@
 # `docker stop <name>`).
 #
 # Env: IMAGE, PORT (host), QUANT, CTX, PARALLEL, GPU_LAYERS, SPEC, DRAFT_MAX,
-#      MMPROJ, REASONING, FLASH_ATTN, CACHE_TYPE, ALIAS, HF_TOKEN, HF_HOME, DETACH.
+#      MMPROJ, REASONING, FLASH_ATTN, CACHE_TYPE, CACHE_RAM, ALIAS, HF_TOKEN, HF_HOME,
+#      DETACH.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -84,6 +86,9 @@ DRAFT_MAX="${DRAFT_MAX:-2}"            # measured best on sampled thinking outpu
 MMPROJ="${MMPROJ:-1}"                  # vision encoder: +1.1 GiB, MTP still active with it
 FLASH_ATTN="${FLASH_ATTN:-on}"
 CACHE_TYPE="${CACHE_TYPE:-q8_0}"
+CACHE_RAM="${CACHE_RAM:-2048}"         # host-RAM prompt cache cap, MiB (llama.cpp default 8192).
+                                       # Capped so the box stays stable with run-laya.sh
+                                       # resident -- see MEMORY below. 0 disables it
 HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 mkdir -p "$HF_HOME"
 
@@ -165,14 +170,27 @@ fi
 # defaults: 77770 MiB GPU at boot on b11696 (77480 with the old shared head
 # on the PR build), and free "used" rose from 84.2 to 90.4 GiB
 # over a benchmark session, most likely as the host-RAM prompt cache filled
-# (its default --cache-ram cap is 8192 MiB). Budget ~76 GiB GPU + 26.8 GiB PLE + up to 8 GiB
-# prompt cache. Squeeze it and the kernel evicts PLE pages to SSD. That should
-# still work, but slower (unmeasured).
+# (llama.cpp's default --cache-ram cap is 8192 MiB). Budget ~76 GiB GPU +
+# 26.8 GiB PLE + the prompt cache. Squeeze it and the kernel evicts PLE pages
+# to SSD. That should still work, but slower (unmeasured).
+#
+# The prompt cache is the one part that grows over time: after 9 days up at
+# the 8192 default the box had 8 GiB in swap (likely, not proven, the cache).
+# CACHE_RAM caps it at 2048 MiB, keeping ~6 GiB more for the PLE pages and for
+# run-laya.sh beside it. Cost: a long prompt evicted from its slot is
+# re-prefilled rather than restored from host RAM.
 #
 # Re-measured on b11696 (image ceefd16d, self-contained Q4_K_M head), same
 # method as the table that follows:
 #   SPEC=0       greedy 29.4 t/s            think 29.2 t/s
 #   DRAFT_MAX=2  greedy 43.5 t/s 1.48x 73%  think 37.9 t/s 1.30x 58%
+# And on b11881 (image fa3645fe), DRAFT_MAX=2 greedy, 300 tokens: 44-46 t/s,
+# 77% accepted, 77704 MiB GPU at boot.
+#
+# SHARING THE BOX WITH run-laya.sh (port 8081) fits: Laya adds ~1.2 GiB GPU.
+# It does compete for compute, measured as greedy decode here vs Laya load:
+#   Laya idle 44.1 t/s | 25 decisions/s 39.5 | saturated short 28.3 |
+#   saturated with ~7k-token states 12-27
 #
 # Measured on this box (image d1a92352 / PR #28243, shared-Q4_K_M head,
 # UD-IQ4_XS, q8_0 KV, -fa on, warm, single stream). "greedy" = temp 0, no thinking, 400 tokens, mean of 2 warm
@@ -252,6 +270,7 @@ server_args=(
   --top-k 20
   --min-p 0.0
   --repeat-penalty 1.0
+  --cache-ram "${CACHE_RAM}"
 )
 
 case "$REASONING" in
