@@ -22,7 +22,7 @@
 #
 # Requires a llama.cpp build >= b10353 (Muse Glimmer support, upstream #26841).
 # Measured on b10375 (rollback image llama-spark:ba360efe); build.lock now pins
-# the newer release b11696. Rebuild with ./build.sh --reproduce.
+# the newer release b11881. Rebuild with ./build.sh --reproduce.
 #
 # Usage:
 #   ./run-muse-glimmer.sh                    # foreground (Ctrl-C to stop)

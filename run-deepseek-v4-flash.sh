@@ -33,7 +33,7 @@
 # Requires a llama.cpp build >= b10269 (b10228 added DeepSeek-V4 DSpark, but
 # b10259-b10268 advertise `draft-dspark` and then abort while loading the
 # drafter -- avoid that window). Measured on b10375 (rollback image
-# llama-spark:ba360efe); build.lock now pins the newer release b11696.
+# llama-spark:ba360efe); build.lock now pins the newer release b11881.
 # ./build.sh --reproduce.
 #
 # Usage:

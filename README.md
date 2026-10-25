@@ -39,13 +39,14 @@ with `-DCMAKE_CUDA_ARCHITECTURES=121a`, then ship the binary on a slim
 | `run-deepseek-v4-flash.sh` | Pinned runner for `unsloth/DeepSeek-V4-Flash-0731-GGUF` (default `UD-IQ2_M`), with DSpark speculative decoding. |
 | `run-muse-glimmer.sh` | Pinned runner for `unsloth/Muse-Glimmer-30B-GGUF` (default `UD-Q6_K_XL`), with vision + DFlash speculative decoding. |
 | `run-qwen3.8-flash-next.sh` | Pinned runner for `unsloth/Qwen3.8-Flash-Next-GGUF` (default `UD-IQ4_XS`), with vision + MTP speculative decoding. |
+| `run-laya.sh` | Pinned runner for the `ggml-org/Laya-GGUF` decision model (default `Q8_0`) on port 8081, serving `/v1/systemone`. Fits beside Qwen. |
 | `build.lock`  | Generated pins for `./build.sh --reproduce`. |
 
 ## Build
 
 ```bash
 ./build.sh                 # latest llama.cpp master HEAD
-./build.sh --ref b11696    # a specific tag/branch/commit (current pin; or a 40-char SHA)
+./build.sh --ref b11881    # a specific tag/branch/commit (current pin; or a 40-char SHA)
 ./build.sh --reproduce     # rebuild exactly what build.lock records
 ./build.sh --no-ui         # skip the embedded Web UI (no build-time HF fetch)
 ```
@@ -102,6 +103,7 @@ DETACH=1 ./run-zeta-2.sh               # background server, restarts on boot
 ./run-deepseek-v4-flash.sh             # unsloth/DeepSeek-V4-Flash-0731-GGUF (UD-IQ2_M)
 ./run-qwen3.8-flash-next.sh            # unsloth/Qwen3.8-Flash-Next-GGUF (UD-IQ4_XS)
 ./run-muse-glimmer.sh                  # unsloth/Muse-Glimmer-30B-GGUF (UD-Q6_K_XL)
+./run-laya.sh                          # ggml-org/Laya-GGUF (Q8_0) decision model, port 8081
 ```
 
 #### DeepSeek-V4-Flash-0731 — 284B MoE + DSpark speculative decoding
@@ -223,7 +225,7 @@ accounted for — `UD-IQ2_M` is the honest ceiling with DSpark on.
 
 Requires a llama.cpp build **≥ b10269**: b10228 added DeepSeek-V4 DSpark, but
 b10259–b10268 advertise `draft-dspark` and then abort while loading the drafter.
-Measured on b10375; the current `build.lock` pin (b11696) is clear of that window too.
+Measured on b10375; the current `build.lock` pin (b11881) is clear of that window too.
 
 > **Memory**: weights + drafter are ~95 GiB of the shared 121 GiB. Nothing else
 > substantial can be resident — stop any other GPU-heavy containers first
@@ -328,7 +330,7 @@ head and encoder by URL (that path is untested).
 
 **Needs llama.cpp with
 [ggml-org/llama.cpp#29761](https://github.com/ggml-org/llama.cpp/pull/29761)**
-("Qwen4Exp: add MTP", merged 2026-10-01). `build.lock` pins release `b11696`.
+("Qwen4Exp: add MTP", merged 2026-10-01). `build.lock` pins release `b11881`.
 The earlier PR #28243 build this runner started on was closed unmerged.
 
 **The MTP head** is the model's own multi-token-prediction layer. It must be a
@@ -353,6 +355,10 @@ method as below; 77,770 MiB GPU at boot):
 |--------|--------|----------|-------|----------|
 | `SPEC=0` | 29.4 t/s | — | 29.2 t/s | — |
 | `DRAFT_MAX=2` (default) | 43.5 t/s (**1.48×**) | 73% | **37.9 t/s (1.30×)** | 58% |
+
+On **b11881** (image `fa3645fe`) the default config measured 44–46 t/s greedy
+(300 tokens) with 77% of drafts accepted, at 77,704 MiB GPU. Tool calling,
+MTP and vision all load and work unchanged.
 
 **Measured on the Spark** with the earlier PR #28243 build (image `d1a92352`,
 `shared-Q4_K_M` head, `UD-IQ4_XS`, q8_0 KV, `-fa on`, warm, single stream).
@@ -399,8 +405,16 @@ Defaults are therefore `PARALLEL=2`, `CTX=524288` (262,144 per slot), with MTP o
 slot. 8× the context (32k →
 262k) costs ~5.9 GiB on the GPU (4.4 GiB KV plus a larger compute buffer). At
 the defaults, nvidia-smi shows **77.5 GiB**. On top of that sits the 26.8 GiB
-PLE table in page cache (visible in neither nvidia-smi nor free's `used`) and up
-to 8 GiB of host-RAM prompt cache. That is ~104–112 GiB of 121 GiB.
+PLE table in page cache (visible in neither nvidia-smi nor free's `used`) and the
+host-RAM prompt cache. That is ~104–106 GiB of 121 GiB.
+
+The prompt cache is the one part that grows over time. At llama.cpp's
+8,192 MiB default, the box had 8 GiB in swap after 9 days up. That's probably
+the cache, though not proven. `CACHE_RAM` therefore defaults to **2048** MiB
+(`--cache-ram`), which leaves ~6 GiB more for the PLE pages and for Laya beside
+it (below). The cost is that a long prompt evicted from its slot gets
+re-prefilled rather than restored from host RAM. `CACHE_RAM=8192` restores
+llama.cpp's default, and `0` turns the cache off.
 `PARALLEL=1 CTX=262144` saves 5.5 GiB, `MMPROJ=0` saves 1.1 GiB and `SPEC=0`
 saves ~3 GiB.
 
@@ -427,13 +441,90 @@ REASONING=medium ./run-qwen3.8-flash-next.sh   # xhigh (template default) | medi
 SPEC=0 ./run-qwen3.8-flash-next.sh             # no MTP head
 MMPROJ=0 ./run-qwen3.8-flash-next.sh           # text-only
 PARALLEL=1 CTX=262144 ./run-qwen3.8-flash-next.sh   # single slot, 5.5 GiB less
+CACHE_RAM=0 ./run-qwen3.8-flash-next.sh        # no host-RAM prompt cache (default cap 2048 MiB)
 DETACH=1 ./run-qwen3.8-flash-next.sh           # background server, restarts on boot
 ```
 
 > **Memory**: ~104 GiB of the shared 121 GiB once the PLE table is paged in.
 > Nothing else substantial can be resident: stop other GPU-heavy containers
 > first (`docker ps`, then `docker stop <name>`). It also binds port 8080, like
-> the other runners.
+> the other runners. The one measured exception is Laya (below), which is small
+> enough to run beside it.
+
+#### Laya — decision model (`/v1/systemone`), runs beside Qwen
+
+[Laya](https://huggingface.co/blog/ggml-org/decision-models-in-llamacpp) is a
+421M ModernBERT-large **decision model**. It doesn't generate text. It answers
+typed questions about a `state` with probabilities, via the TypeSafe-style
+`POST /v1/systemone` endpoint
+([ggml-org/llama.cpp#29818](https://github.com/ggml-org/llama.cpp/pull/29818),
+first released in `b11361`). `run-laya.sh` serves `ggml-org/Laya-GGUF:Q8_0`
+(0.45 GB; `QUANT=BF16` is 0.84 GB) on **port 8081**, so it can sit next to a
+chat model on 8080.
+
+```bash
+hf download ggml-org/Laya-GGUF Laya-Q8_0.gguf   # optional pre-stage; served in place
+DETACH=1 ./run-laya.sh                           # container "laya", restarts on boot
+
+curl localhost:8081/v1/systemone -H 'Content-Type: application/json' -d '{
+  "state": "I was charged twice for order #4471 and want my money back.",
+  "questions": {
+    "intent": {"type": "choice", "instructions": "What does the customer want?",
+               "criteria": {"refund": "wants money back", "track": null, "other": null}},
+    "urgent": {"type": "noul",   "instructions": "Does this need a human within the hour?"},
+    "mood":   {"type": "score",  "instructions": "How frustrated is the customer?",
+               "criteria": ["calm", "annoyed", "angry"]}
+  }}'
+```
+
+Question types: `choice` (pick one of up to 255 options), `score` (2–10 ordered
+levels, returns the expected level), `noul` (probability of true). Each question
+in a request is decided independently as its own task.
+
+**Load-bearing flags.** The server reads `laya` from the GGUF's
+`decision.type` and switches to embedding mode itself (no pooling, `n_batch`
+clamped to `n_ubatch`, prompt cache off). Laya is non-causal, so **each
+question's whole prompt (state + question + options) must fit in one ubatch**.
+`UBATCH` defaults to 8192, ModernBERT's trained context. A ~7.9k-token state
+works. At 8,671 tokens the server returns HTTP 500 `input … is too large to
+process`: the state is rejected, not truncated (Laya only trims long questions
+and options). `PARALLEL` defaults to 8 slots. Laya has no KV cache, so going
+from 4 to 8 slots cost nothing measurable and cut a 5-question request from
+29 to 21 ms.
+
+**Measured** on b11881, Q8_0, `PARALLEL=8`, with Qwen3.8-Flash-Next resident:
+
+| | Result |
+|---|---|
+| Memory | **1.2 GiB GPU** (nvidia-smi), ~0.9 GiB container RSS; loads in < 1 s |
+| Accuracy | PR #29818's 5-question reference request (414 tokens): every probability within 0.003 of the reference |
+| Latency, 5 questions / 414 tokens | 21 ms (Qwen idle), 50–80 ms while Qwen decodes |
+| Latency, one long question | ~0.4 s at ~3.6k tokens, ~0.9 s at ~7.9k |
+| Throughput | 8 clients: ~32 req/s (~160 decisions/s), even across clients, worst 0.27 s |
+
+**Running it beside Qwen3.8-Flash-Next: yes.** Memory is not the problem.
+Laya's 1.2 GiB takes system `MemAvailable` from ~11 to ~10 GiB with Qwen at its
+defaults (77.7 GiB GPU plus the paged PLE table). Qwen's `CACHE_RAM=2048` cap
+keeps its prompt cache from eating that margin over time. To free more, see
+Qwen's memory options above: `PARALLEL=1 CTX=262144` (−5.5 GiB) and
+`MMPROJ=0` (−1.1 GiB). Compute *is* shared: both
+run on the one GPU, so Laya load slows Qwen decode (greedy, 300 tokens):
+
+| Laya load | Qwen decode |
+|---|---|
+| idle | 44.1 t/s |
+| 5 req/s × 5 questions (25 decisions/s) | 39.5 t/s (−10%) |
+| saturated, short requests (~70 decisions/s) | 28.3 t/s (−36%) |
+| saturated, 4 clients with ~7k-token states | 12–27 t/s |
+
+A classifier sitting in front of a chat model at typical rates costs Qwen ~10%.
+Bulk scoring of long documents is better run while Qwen is quiet.
+
+**Caveat: long states under sustained concurrency.** When every prompt nearly
+fills `UBATCH`, only one fits per batch, and llama-server keeps refilling it
+from the same slots. In testing, 4 clients looped on ~7k-token states: two ran
+at 2.1 s per request while the other two waited ~32 s. `PARALLEL=8` didn't help.
+Short states are unaffected.
 
 ### Useful env vars (see `run.sh` header)
 
@@ -447,11 +538,15 @@ but all models stay under one directory.
 
 ## Notes
 
-- **Current pin**: release tag **`b11696`** (`ceefd16da`), which includes
-  mainline Qwen3.8-Flash-Next MTP
-  ([ggml-org/llama.cpp#29761](https://github.com/ggml-org/llama.cpp/pull/29761)).
+- **Current pin**: release tag **`b11881`** (`fa3645feb`, 2026-10-25), which
+  includes mainline Qwen3.8-Flash-Next MTP
+  ([ggml-org/llama.cpp#29761](https://github.com/ggml-org/llama.cpp/pull/29761))
+  and the `/v1/systemone` decision-model API
+  ([#29818](https://github.com/ggml-org/llama.cpp/pull/29818)). Qwen3.8-Flash-Next
+  and Laya are verified on it.
 - **Previous pins**, still tagged locally for rollback
-  (`IMAGE=llama-spark:<tag> ./run-….sh`): `d1a92352` (head of the closed,
+  (`IMAGE=llama-spark:<tag> ./run-….sh`): `ceefd16d` (release `b11696`),
+  `d1a92352` (head of the closed,
   unmerged PR #28243; the only build that loads the `shared-` MTP heads) and
   `ba360efe` (release `b10375`). The DeepSeek-V4-Flash, Muse Glimmer, Gemma and
   Zeta runners were measured on `b10375` and have not been re-verified since. DeepSeek-V4-Flash DSpark
