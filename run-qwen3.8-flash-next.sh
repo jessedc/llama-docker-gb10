@@ -6,7 +6,7 @@
 # speculative decoding.
 #
 # Three files from the one repo are involved:
-#   - the target model    UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-*.gguf  (87.24 GiB, 3 shards)
+#   - the target model    UD-IQ4_XS/Qwen3.8-Flash-Next-UD-IQ4_XS-*.gguf  (87.24 GiB, 4 shards)
 #   - the MTP head        MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf         (2.59 GiB)
 #   - the vision encoder  mmproj-F16.gguf                                (0.84 GiB)
 #
@@ -20,6 +20,16 @@
 # and heavy quantization damages it. UD-IQ4_XS (KLD 0.084, top-1 89.6%) is the
 # largest quant that leaves real headroom here. The next step up, UD-Q4_K_XL
 # (KLD 0.047, top-1 92.3%), is 103.7 GiB before KV, the head or the desktop.
+#
+# DYNAMIC v3.1 (2026-11-04). Unsloth requantized the UD quants in place. Same
+# file size, but a different mix: attention and shared experts Q8_0 -> Q6_K,
+# routed experts re-spread across IQ2_S/IQ3_XXS/IQ4_XS (and Q5_0/Q2_0 on
+# ffn_down), the token embedding Q8_0 -> IQ4_XS. The PLE table is unchanged
+# (IQ4_NL) but now sits alone in shard -00004-of-00004. The KLD figures above
+# are the v3 ones; Unsloth published no v3.1 KLD for this quant. b11881 loads
+# it as is (Q2_0 has CUDA kernels there). The MTP head and mmproj are
+# unchanged. The repo's engram/ tables can swap that shard for Q5_1/Q8_0/BF16,
+# but each adds 9.6-73.6 GB of page cache this box does not have.
 #
 # THE MTP HEAD
 # The model's own multi-token-prediction layer, extracted to a separate GGUF.
@@ -187,6 +197,20 @@ fi
 # And on b11881 (image fa3645fe), DRAFT_MAX=2 greedy, 300 tokens: 44-46 t/s,
 # 77% accepted, 77704 MiB GPU at boot.
 #
+# Re-measured on b11881 with the Dynamic v3.1 UD-IQ4_XS (same method, new
+# prompt: hash-map explanation + code; GPU at boot in the last column):
+#   | config      | greedy        | think         | GPU MiB |
+#   |-------------|---------------|---------------|---------|
+#   | SPEC=0      | 30.8          | 30.6          | 73085   |
+#   | DRAFT_MAX=2 | 46.1 76%      | 36.0 1.18x 47%| 77913   |
+#   | DRAFT_MAX=3 | 50.1 69%      | 34.4 38%      | 78138   |
+#   | DRAFT_MAX=4 | 44.4 54%      | 29.4 29%      | 78363   |
+#   | DRAFT_MAX=5 | 42.9 47%      | 27.9 24%      | 78588   |
+# The v3 quant on the same build and prompt, just before the switch:
+# DRAFT_MAX=2 greedy 48.0 (86%), think 33.5 (44%), 77768 MiB. So v3.1 is a
+# wash on speed, and 2 stays the default: 3 wins greedy, 2 wins thinking,
+# and 4-5 now lose on both. Tool calling and vision re-verified on v3.1.
+#
 # SHARING THE BOX WITH run-laya.sh (port 8081) fits: Laya adds ~1.2 GiB GPU.
 # It does compete for compute, measured as greedy decode here vs Laya load:
 #   Laya idle 44.1 t/s | 25 decisions/s 39.5 | saturated short 28.3 |
@@ -206,6 +230,7 @@ fi
 #   | DRAFT_MAX=4               | 48.8      | 67%      | 31.0      | 41%      |
 #   | DRAFT_MAX=5               | 47.6      | 60%      | 31.9      | 36%      |
 #
+# (The table above is the v3 quant on the PR build; v3.1 is re-measured above.)
 # Unsloth's guide suggests 5 and their MTP README suggests 2. On sampled
 # thinking output, which is what this server mostly produces, 2 is fastest,
 # and past 2 the extra drafts are mostly rejected. On greedy text 3-5 run

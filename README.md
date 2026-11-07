@@ -315,7 +315,7 @@ context, hybrid thinking, multimodal) and pulls three files from the one repo:
 
 | Part | File | Size | Notes |
 |------|------|------|-------|
-| Target model | `UD-IQ4_XS/…-UD-IQ4_XS-*.gguf` (3 shards) | 87.24 GiB | 61.2 GiB goes to the GPU; the 26.8 GiB per-layer-embedding table stays mmapped |
+| Target model | `UD-IQ4_XS/…-UD-IQ4_XS-*.gguf` (4 shards, Dynamic v3.1) | 87.24 GiB | 61.2 GiB goes to the GPU; the 26.8 GiB per-layer-embedding table (shard 4) stays mmapped |
 | MTP head | `MTP/mtp-Qwen3.8-Flash-Next-Q4_K_M.gguf` | 2.59 GiB | must be named explicitly with `-md` |
 | Vision encoder | `mmproj-F16.gguf` | 0.84 GiB | `MMPROJ=0` opts out |
 
@@ -347,6 +347,33 @@ the repo root for `-hf` auto-discovery), trading ~2 points of acceptance for
   `docker logs qwen3.8-flash-next`.
 - **The model id is `Qwen3.8-Flash-Next`** (`--alias`; override with `ALIAS=`).
   Without it, serving with `-m` reports the first shard's filename.
+
+**Dynamic v3.1 quants (2026-11-04).** Unsloth requantized the UD quants in
+place: same 87.24 GiB, but a different bit mix. Attention and shared experts
+drop from Q8_0 to Q6_K, the routed experts are re-spread (and two `ffn_down`
+tensors use `Q2_0`), and the per-layer-embedding table moves to its own shard
+`-00004-of-00004`, unchanged at IQ4_NL. b11881 loads it as is. The MTP head and
+`mmproj` are unchanged. Unsloth published no v3.1 KLD for UD-IQ4_XS, so the
+quality gain is their benchmark claim only. The repo's `engram/` tables can
+replace that shard with Q5_1, Q8_0 or BF16, but they add 9.6–73.6 GB of page
+cache this box doesn't have. Measured on b11881 (image `fa3645fe`, same method
+as below, hash-map explain-and-code prompt):
+
+| Config | Greedy | Accepted | Think | Accepted | GPU at boot |
+|--------|--------|----------|-------|----------|-------------|
+| `SPEC=0` | 30.8 t/s | — | 30.6 t/s | — | 73,085 MiB |
+| `DRAFT_MAX=2` (default) | 46.1 t/s | 76% | **36.0 t/s (1.18×)** | 47% | 77,913 MiB |
+| `DRAFT_MAX=3` | 50.1 t/s | 69% | 34.4 t/s | 38% | 78,138 MiB |
+| `DRAFT_MAX=4` | 44.4 t/s | 54% | 29.4 t/s | 29% | 78,363 MiB |
+| `DRAFT_MAX=5` | 42.9 t/s | 47% | 27.9 t/s | 24% | 78,588 MiB |
+
+The v3 quant on the same build and prompt, measured just before the switch:
+48.0 t/s greedy (86%) and 33.5 t/s think (44%) at 77,768 MiB. So v3.1 is a wash
+on speed. `DRAFT_MAX=2` stays the default: 3 is faster on greedy but 2 wins on
+thinking, and 4–5 now lose on both. Tool calling and vision were re-verified
+on v3.1.
+
+The tables below are the v3 quant.
 
 **Re-measured on b11696** (image `ceefd16d`, self-contained `Q4_K_M` head, same
 method as below; 77,770 MiB GPU at boot):
